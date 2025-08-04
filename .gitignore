@@ -1,0 +1,5 @@
+*.pyc
+venv/
+src/logs
+printed_serials.csv
+src/ui/email/email_config.json
