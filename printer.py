@@ -1,372 +1,646 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Service d'impression simplifié sans thread ni file d'attente.
-Traitement immédiat des commandes MQTT.
+Service d'impression minimal avec file d'attente persistante :
+- CREATE : Créer ligne CSV + ajouter à la file d'impression
+- REPRINT : Ajouter à la file d'impression
+- EXPEDITION : Mettre à jour timestamp expédition dans CSV
 """
 
 import socket
 import json
 import re
+import threading
+import time
+import collections
 import paho.mqtt.client as mqtt
 from datetime import datetime
 from src.ui.system_utils import log
 from src.labels import LabelTemplates, PrinterConfig, CSVSerialManager
 
 
-class SimplePrinter:
+class MinimalPrinter:
     """
-    Service d'impression simplifié avec traitement immédiat.
+    Service d'impression minimal avec file d'attente persistante.
     """
-    
+
     def __init__(self):
         """Initialise le service d'impression."""
         self.mqtt_client = None
         self.printer_status = "unknown"
-        
+
+        # File d'attente et verrou pour le threading
+        self.print_queue = collections.deque()
+        self.queue_lock = threading.Lock()
+
         # Initialiser le CSV des séries
         CSVSerialManager.initialize_serial_csv()
-        
-        log("SimplePrinter: Service initialisé", level="INFO")
-        
+
+        log("MinimalPrinter: Service initialisé avec file d'attente",
+            level="INFO")
+
     def start(self):
         """Démarre le service d'impression."""
-        log("SimplePrinter: Démarrage du service", level="INFO")
-        
-        # Vérifier l'IP de l'imprimante
-        if "192.168.1." in PrinterConfig.PRINTER_IP:
-            log("SimplePrinter: ⚠️ IP imprimante par défaut détectée. Vérifiez la configuration.", level="WARNING")
-            
+        log("MinimalPrinter: Démarrage du service minimal avec file d'attente",
+            level="INFO")
+
+        # Démarrer le worker thread pour traiter la file
+        self._start_worker_thread()
+
         # Configuration du client MQTT
         self.mqtt_client = mqtt.Client(
-            client_id="simple_printer_service",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION1 # type: ignore
-        )
-        
+            client_id="minimal_printer_service",
+            callback_api_version=mqtt.CallbackAPIVersion.  # type: ignore
+            VERSION1)
+
         self.mqtt_client.on_connect = self._on_connect
         self.mqtt_client.on_message = self._on_message
         self.mqtt_client.on_disconnect = self._on_disconnect
-        
+
         # Boucle de connexion avec reconnexion automatique
         while True:
             try:
-                log(f"SimplePrinter: Connexion MQTT {PrinterConfig.MQTT_BROKER_HOST}:{PrinterConfig.MQTT_BROKER_PORT}", level="INFO")
-                self.mqtt_client.connect(PrinterConfig.MQTT_BROKER_HOST, PrinterConfig.MQTT_BROKER_PORT, 60)
-                
+                log(f"MinimalPrinter: Connexion MQTT {PrinterConfig.MQTT_BROKER_HOST}:{PrinterConfig.MQTT_BROKER_PORT}",
+                    level="INFO")
+                self.mqtt_client.connect(PrinterConfig.MQTT_BROKER_HOST,
+                                         PrinterConfig.MQTT_BROKER_PORT, 60)
+
                 # Démarrer la boucle (bloquante)
                 self.mqtt_client.loop_forever()
-                
+
             except Exception as e:
-                log(f"SimplePrinter: Erreur connexion MQTT: {e}", level="ERROR")
-                import time
-                time.sleep(5)  # Attendre avant de reconnecter
-                
+                log(f"MinimalPrinter: Erreur connexion MQTT: {e}",
+                    level="ERROR")
+                time.sleep(5)
+
+    def _start_worker_thread(self):
+        """Démarre le thread worker pour traiter la file d'impression."""
+        worker = threading.Thread(target=self._printer_worker_thread,
+                                  name="PrinterWorker",
+                                  daemon=True)
+        worker.start()
+        log("MinimalPrinter: Thread worker démarré", level="INFO")
+
+    def _printer_worker_thread(self):
+        """Thread worker qui traite la file d'impression en continu."""
+        log("MinimalPrinter: Worker thread actif", level="INFO")
+
+        while True:
+            item_to_print = None
+
+            # Récupérer un élément de la file de manière thread-safe
+            with self.queue_lock:
+                if self.print_queue:
+                    item_to_print = self.print_queue[0]
+
+            if item_to_print:
+                # Vérifier le statut de l'imprimante
+                status_info = self._check_printer_status()
+
+                if status_info['ready']:
+                    # Imprimante prête, tenter l'impression
+                    success = self._process_print_item(item_to_print)
+
+                    if success:
+                        # Retirer de la file en cas de succès
+                        with self.queue_lock:
+                            if self.print_queue and self.print_queue[
+                                    0] == item_to_print:
+                                self.print_queue.popleft()
+                                log(f"MinimalPrinter: Item imprimé et retiré de la file. Restants: {len(self.print_queue)}",
+                                    level="INFO")
+                        time.sleep(PrinterConfig.DELAY_AFTER_SUCCESS_S)
+                    else:
+                        # Échec impression, garder en file et retry
+                        log(f"MinimalPrinter: Échec impression, retry dans {PrinterConfig.RETRY_DELAY_ON_ERROR_S}s",
+                            level="WARNING")
+                        time.sleep(PrinterConfig.RETRY_DELAY_ON_ERROR_S)
+                else:
+                    # Imprimante pas prête, attendre et retry
+                    log(f"MinimalPrinter: Imprimante non prête ({status_info['message']}), retry dans {PrinterConfig.RETRY_DELAY_ON_ERROR_S}s",
+                        level="DEBUG")
+                    time.sleep(PrinterConfig.RETRY_DELAY_ON_ERROR_S)
+            else:
+                # File vide, attendre
+                time.sleep(PrinterConfig.POLL_DELAY_WHEN_IDLE_S)
+
+    def _process_print_item(self, item):
+        """
+        Traite un élément de la file d'impression.
+        
+        Args:
+            item: Tuple (action_type, serial_number, random_code, fabrication_date)
+            
+        Returns:
+            bool: True si succès, False sinon
+        """
+        if not item or len(item) < 4:
+            log(f"MinimalPrinter: Item malformé: {item}", level="ERROR")
+            return True  # Retirer de la file
+
+        action_type, serial_number, random_code, fabrication_date = item
+
+        if action_type == "PRINT_ALL_THREE":
+            return self._print_all_three_labels(serial_number, random_code,
+                                                fabrication_date)
+        else:
+            log(f"MinimalPrinter: Type d'action inconnu: {action_type}",
+                level="ERROR")
+            return True  # Retirer de la file
+
+    def _check_printer_status(self):
+        """
+        Vérifie le statut de l'imprimante pour l'UI.
+        
+        Returns:
+            dict: {
+                'status': 'OK'|'MEDIA_OUT'|'HEAD_OPEN'|'ERROR',
+                'message': 'Description lisible',
+                'ready': True|False
+            }
+        """
+        sock = None
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
+            sock.connect(
+                (PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
+
+            # Envoyer commande de statut
+            command = b'~HQES\r\n'
+            sock.sendall(command)
+
+            # Recevoir réponse
+            response_bytes = b''
+            try:
+                while True:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    response_bytes += chunk
+                    if b'\x03' in chunk:  # ETX
+                        break
+            except socket.timeout:
+                if not response_bytes:
+                    return {
+                        'status': PrinterConfig.STATUS_ERROR_COMM,
+                        'message': 'Timeout communication',
+                        'ready': False
+                    }
+
+            if response_bytes:
+                response_str = response_bytes.decode('ascii', errors='ignore')
+                parsed_data = self._parse_hqes_response(response_str)
+
+                if parsed_data:
+                    error_flag, error_g2_hex, error_g1_hex, _, _, _ = parsed_data
+
+                    if error_flag == '0':
+                        return {
+                            'status': PrinterConfig.STATUS_OK,
+                            'message': 'Imprimante prête',
+                            'ready': True
+                        }
+                    else:
+                        try:
+                            error_g1_int = int(error_g1_hex, 16)
+
+                            if error_g1_int & PrinterConfig.ERROR_MASK_MEDIA_OUT:
+                                return {
+                                    'status': PrinterConfig.STATUS_MEDIA_OUT,
+                                    'message': 'Plus de papier/étiquettes',
+                                    'ready': False
+                                }
+                            elif error_g1_int & PrinterConfig.ERROR_MASK_HEAD_OPEN:
+                                return {
+                                    'status': PrinterConfig.STATUS_HEAD_OPEN,
+                                    'message': 'Tête d\'impression ouverte',
+                                    'ready': False
+                                }
+                            else:
+                                return {
+                                    'status':
+                                    PrinterConfig.STATUS_ERROR_UNKNOWN,
+                                    'message':
+                                    f'Erreur inconnue (G1: {error_g1_hex})',
+                                    'ready': False
+                                }
+                        except ValueError:
+                            return {
+                                'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
+                                'message': 'Erreur parsing statut',
+                                'ready': False
+                            }
+                else:
+                    return {
+                        'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
+                        'message': 'Réponse imprimante non comprise',
+                        'ready': False
+                    }
+            else:
+                return {
+                    'status': PrinterConfig.STATUS_ERROR_COMM,
+                    'message': 'Aucune réponse de l\'imprimante',
+                    'ready': False
+                }
+
+        except socket.timeout:
+            return {
+                'status': PrinterConfig.STATUS_ERROR_COMM,
+                'message': 'Timeout connexion imprimante',
+                'ready': False
+            }
+        except socket.error as e:
+            return {
+                'status': PrinterConfig.STATUS_ERROR_COMM,
+                'message': f'Erreur réseau: {str(e)[:50]}',
+                'ready': False
+            }
+        except Exception as e:
+            return {
+                'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
+                'message': f'Erreur inattendue: {str(e)[:50]}',
+                'ready': False
+            }
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+
+    def _parse_hqes_response(self, response_str):
+        """Parse la réponse ~HQES."""
+        error_flag, error_g2, error_g1 = '0', '00000000', '00000000'
+        warn_flag, warn_g2, warn_g1 = '0', '00000000', '00000000'
+        found_errors = False
+
+        pattern = re.compile(
+            r"^\s*([A-Z]+):\s+(\d)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)")
+
+        lines = response_str.splitlines()
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                section, flag, g2_hex, g1_hex = match.groups()
+                if section == "ERRORS":
+                    error_flag, error_g2, error_g1 = flag, g2_hex, g1_hex
+                    found_errors = True
+                elif section == "WARNINGS":
+                    warn_flag, warn_g2, warn_g1 = flag, g2_hex, g1_hex
+
+        if found_errors:
+            return error_flag, error_g2.zfill(8), error_g1.zfill(
+                8), warn_flag, warn_g2.zfill(8), warn_g1.zfill(8)
+        else:
+            return None
+
+    def _print_all_three_labels(self, serial_number, random_code,
+                                fabrication_date):
+        """
+        Imprime les 3 étiquettes pour un serial donné.
+        
+        Returns:
+            bool: True si toutes les impressions réussies
+        """
+        success_v1 = self._print_v1_label(serial_number, random_code,
+                                          fabrication_date)
+        success_main = self._print_main_label(serial_number, random_code)
+        success_shipping = self._print_shipping_label(serial_number)
+
+        if success_v1 and success_main and success_shipping:
+            log(f"MinimalPrinter: 3 étiquettes imprimées avec succès pour {serial_number}",
+                level="INFO")
+            return True
+        else:
+            log(f"MinimalPrinter: Impression partielle pour {serial_number} (V1:{success_v1}, Main:{success_main}, Ship:{success_shipping})",
+                level="WARNING")
+            return False
+
     def _on_connect(self, client, userdata, flags, rc):
         """Callback de connexion MQTT."""
         if rc == 0:
-            log("SimplePrinter: Connexion MQTT réussie", level="INFO")
-            
-            # S'abonner aux topics nécessaires
+            log("MinimalPrinter: Connexion MQTT réussie", level="INFO")
+
+            # S'abonner seulement aux 3 topics essentiels
             topics = [
-                PrinterConfig.MQTT_TOPIC_CREATE_LABEL,
-                PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT,
-                PrinterConfig.MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP,
-                PrinterConfig.MQTT_TOPIC_TEST_DONE,
-                PrinterConfig.MQTT_TOPIC_CREATE_BATCH_LABELS
+                PrinterConfig.MQTT_TOPIC_CREATE_LABEL,  # CREATE
+                PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT,  # REPRINT
+                PrinterConfig.
+                MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP  # EXPEDITION
             ]
-            
+
             for topic in topics:
                 client.subscribe(topic, 1)
-                log(f"SimplePrinter: Abonné à {topic}", level="DEBUG")
-                
-            # Publier le statut initial de l'imprimante
-            self._update_printer_status()
-            
+                log(f"MinimalPrinter: Abonné à {topic}", level="DEBUG")
+
+            # Publier le statut initial
+            self._publish_printer_status()
+
         else:
-            log(f"SimplePrinter: Échec connexion MQTT, code: {rc}", level="ERROR")
-            
+            log(f"MinimalPrinter: Échec connexion MQTT, code: {rc}",
+                level="ERROR")
+
     def _on_message(self, client, userdata, msg):
         """Callback de réception de message MQTT."""
         try:
             topic = msg.topic
             payload_str = msg.payload.decode("utf-8")
-            
-            log(f"SimplePrinter: Message reçu sur {topic}: {payload_str}", level="INFO")
-            
-            # Router vers le bon handler
-            handlers = {
-                PrinterConfig.MQTT_TOPIC_CREATE_LABEL: self._handle_create_label,
-                PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT: self._handle_full_reprint,
-                PrinterConfig.MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP: self._handle_shipping_update,
-                PrinterConfig.MQTT_TOPIC_TEST_DONE: self._handle_test_done,
-                PrinterConfig.MQTT_TOPIC_CREATE_BATCH_LABELS: self._handle_batch_creation,
-            }
-            
-            handler = handlers.get(topic)
-            if handler:
-                handler(payload_str)
+
+            log(f"MinimalPrinter: Message reçu sur {topic}: {payload_str}",
+                level="INFO")
+
+            # Router vers les 3 handlers essentiels
+            if topic == PrinterConfig.MQTT_TOPIC_CREATE_LABEL:
+                self._handle_create(payload_str)
+
+            elif topic == PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT:
+                self._handle_reprint(payload_str)
+
+            elif topic == PrinterConfig.MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP:
+                self._handle_expedition(payload_str)
+
             else:
-                log(f"SimplePrinter: Topic non géré: {topic}", level="WARNING")
-                
+                log(f"MinimalPrinter: Topic non géré: {topic}",
+                    level="WARNING")
+
         except Exception as e:
-            log(f"SimplePrinter: Erreur traitement message: {e}", level="ERROR")
-            
+            log(f"MinimalPrinter: Erreur traitement message: {e}",
+                level="ERROR")
+
     def _on_disconnect(self, client, userdata, rc):
         """Callback de déconnexion MQTT."""
-        log(f"SimplePrinter: Déconnexion MQTT, code: {rc}", level="WARNING")
-        
-    def _handle_create_label(self, payload_str):
-        """Gère la création d'une nouvelle étiquette."""
+        log(f"MinimalPrinter: Déconnexion MQTT, code: {rc}", level="WARNING")
+
+    def _handle_create(self, payload_str):
+        """
+        CREATE : Créer ligne CSV + ajouter à la file d'impression.
+        Format: {"checker_name": "nom"}
+        """
         try:
             data = json.loads(payload_str)
             checker_name = data.get("checker_name", "").strip()
-            
+
             if not checker_name:
-                log("SimplePrinter: Nom de checkeur manquant", level="ERROR")
+                log("MinimalPrinter: CREATE - Nom de checkeur manquant",
+                    level="ERROR")
+                self._publish_operation_result("create", False,
+                                               "Nom de checkeur manquant")
                 return
-                
-            # Générer le numéro de série
+
+            # Générer nouveau serial
             serial_number = CSVSerialManager.generate_next_serial_number()
             random_code = CSVSerialManager.generate_random_code()
             timestamp_iso = datetime.now().isoformat()
             fabrication_date = datetime.now().strftime("%d/%m/%Y")
-            
-            # Enregistrer dans le CSV
-            if not CSVSerialManager.add_serial_to_csv(timestamp_iso, serial_number, random_code, checker_name):
-                log(f"SimplePrinter: Échec enregistrement CSV pour {serial_number}", level="ERROR")
+
+            # TOUJOURS créer la ligne CSV d'abord
+            if not CSVSerialManager.add_serial_to_csv(
+                    timestamp_iso, serial_number, random_code, checker_name):
+                log(f"MinimalPrinter: CREATE - Échec enregistrement CSV pour {serial_number}",
+                    level="ERROR")
+                self._publish_operation_result("create", False,
+                                               "Erreur sauvegarde CSV")
                 return
-                
-            # Imprimer l'étiquette V1
-            success = self._print_v1_label(serial_number, random_code, fabrication_date)
-            
-            if success:
-                log(f"SimplePrinter: Étiquette créée avec succès: {serial_number}", level="INFO")
-            else:
-                log(f"SimplePrinter: Échec impression étiquette: {serial_number}", level="ERROR")
-                
+
+            log(f"MinimalPrinter: CREATE - CSV mis à jour pour {serial_number} (checkeur: {checker_name})",
+                level="INFO")
+
+            # Ajouter à la file d'impression (sera traité quand l'imprimante sera prête)
+            with self.queue_lock:
+                self.print_queue.append(("PRINT_ALL_THREE", serial_number,
+                                         random_code, fabrication_date))
+                queue_size = len(self.print_queue)
+
+            log(f"MinimalPrinter: CREATE - {serial_number} ajouté à la file d'impression ({queue_size} en attente)",
+                level="INFO")
+            self._publish_operation_result(
+                "create", True,
+                f"Série créée: {serial_number} (en file d'impression)")
+
         except json.JSONDecodeError:
-            log(f"SimplePrinter: Payload JSON invalide pour create_label", level="ERROR")
+            log("MinimalPrinter: CREATE - Payload JSON invalide",
+                level="ERROR")
+            self._publish_operation_result("create", False,
+                                           "Format JSON invalide")
         except Exception as e:
-            log(f"SimplePrinter: Erreur create_label: {e}", level="ERROR")
-            
-    def _handle_full_reprint(self, payload_str):
-        """Gère la réimpression complète d'une batterie."""
+            log(f"MinimalPrinter: CREATE - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("create", False,
+                                           f"Erreur: {str(e)[:50]}")
+
+    def _handle_reprint(self, payload_str):
+        """
+        REPRINT : Ajouter à la file d'impression les 3 étiquettes d'un serial existant.
+        Format: "RW-48v271XXXX" (juste le serial number)
+        """
         try:
             serial_number = payload_str.strip()
-            
-            # Récupérer les détails depuis le CSV
-            found_serial, random_code, timestamp_impression = CSVSerialManager.get_details_for_reprint_from_csv(serial_number)
-            
-            if not all([found_serial, random_code, timestamp_impression]):
-                log(f"SimplePrinter: Données manquantes pour réimpression de {serial_number}", level="ERROR")
+
+            if not serial_number:
+                log("MinimalPrinter: REPRINT - Numéro de série manquant",
+                    level="ERROR")
+                self._publish_operation_result("reprint", False,
+                                               "Numéro de série manquant")
                 return
-                
+
+            # Récupérer les détails depuis le CSV
+            found_serial, random_code, timestamp_impression = CSVSerialManager.get_details_for_reprint_from_csv(
+                serial_number)
+
+            if not all([found_serial, random_code, timestamp_impression]):
+                log(f"MinimalPrinter: REPRINT - Serial {serial_number} non trouvé dans CSV",
+                    level="ERROR")
+                self._publish_operation_result(
+                    "reprint", False, f"Serial {serial_number} non trouvé")
+                return
+
             # Extraire la date de fabrication
             try:
                 if timestamp_impression:
-                    dt_impression = datetime.fromisoformat(timestamp_impression)
+                    dt_impression = datetime.fromisoformat(
+                        timestamp_impression)
                     fabrication_date = dt_impression.strftime("%d/%m/%Y")
                 else:
-                    # timestamp_impression est None
                     fabrication_date = datetime.now().strftime("%d/%m/%Y")
-                    log(f"SimplePrinter: Timestamp impression vide pour {serial_number}, utilisation date actuelle", level="WARNING")
+                    log(f"MinimalPrinter: REPRINT - Timestamp vide pour {serial_number}, utilisation date actuelle",
+                        level="WARNING")
             except (ValueError, TypeError) as e:
                 fabrication_date = datetime.now().strftime("%d/%m/%Y")
-                log(f"SimplePrinter: Erreur parsing date impression pour {serial_number}: {e}, utilisation date actuelle", level="WARNING")
-                
-            # Imprimer les 3 étiquettes
-            success_v1 = self._print_v1_label(serial_number, random_code, fabrication_date)
-            success_main = self._print_main_label(serial_number, random_code)
-            success_shipping = self._print_shipping_label(serial_number)
-            
-            if success_v1 and success_main and success_shipping:
-                log(f"SimplePrinter: Réimpression complète réussie: {serial_number}", level="INFO")
-            else:
-                log(f"SimplePrinter: Réimpression partielle pour {serial_number}", level="WARNING")
-                
+                log(f"MinimalPrinter: REPRINT - Erreur parsing date pour {serial_number} ({e}), utilisation date actuelle",
+                    level="WARNING")
+
+            # Ajouter à la file d'impression
+            with self.queue_lock:
+                self.print_queue.append(("PRINT_ALL_THREE", serial_number,
+                                         random_code, fabrication_date))
+                queue_size = len(self.print_queue)
+
+            log(f"MinimalPrinter: REPRINT - {serial_number} ajouté à la file d'impression ({queue_size} en attente)",
+                level="INFO")
+            self._publish_operation_result(
+                "reprint", True, f"Réimpression programmée: {serial_number}")
+
         except Exception as e:
-            log(f"SimplePrinter: Erreur full_reprint: {e}", level="ERROR")
-            
-    def _handle_shipping_update(self, payload_str):
-        """Gère la mise à jour du timestamp d'expédition."""
+            log(f"MinimalPrinter: REPRINT - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("reprint", False,
+                                           f"Erreur: {str(e)[:50]}")
+
+    def _handle_expedition(self, payload_str):
+        """
+        EXPEDITION : Mettre à jour timestamp expédition dans CSV.
+        Format: {"serial_number": "RW-48v271XXXX", "timestamp_expedition": "2025-01-01T12:00:00"}
+        """
         try:
             data = json.loads(payload_str)
-            serial_number = data.get("serial_number")
-            timestamp_expedition = data.get("timestamp_expedition")
-            
+            serial_number = data.get("serial_number", "").strip()
+            timestamp_expedition = data.get("timestamp_expedition", "").strip()
+
             if not all([serial_number, timestamp_expedition]):
-                log("SimplePrinter: Données manquantes pour shipping_update", level="ERROR")
+                log("MinimalPrinter: EXPEDITION - Données manquantes",
+                    level="ERROR")
+                self._publish_operation_result("expedition", False,
+                                               "Données manquantes")
                 return
-                
+
             # Mettre à jour le CSV
-            success = CSVSerialManager.update_csv_with_shipping_timestamp(serial_number, timestamp_expedition)
-            
+            success = CSVSerialManager.update_csv_with_shipping_timestamp(
+                serial_number, timestamp_expedition)
+
             if success:
-                log(f"SimplePrinter: Timestamp expédition mis à jour: {serial_number}", level="INFO")
+                log(f"MinimalPrinter: EXPEDITION réussie pour {serial_number}",
+                    level="INFO")
+                self._publish_operation_result(
+                    "expedition", True,
+                    f"Expédition mise à jour: {serial_number}")
             else:
-                log(f"SimplePrinter: Échec mise à jour expédition: {serial_number}", level="ERROR")
-                
+                log(f"MinimalPrinter: EXPEDITION - Échec mise à jour {serial_number}",
+                    level="ERROR")
+                self._publish_operation_result(
+                    "expedition", False, f"Échec mise à jour: {serial_number}")
+
         except json.JSONDecodeError:
-            log("SimplePrinter: Payload JSON invalide pour shipping_update", level="ERROR")
+            log("MinimalPrinter: EXPEDITION - Payload JSON invalide",
+                level="ERROR")
+            self._publish_operation_result("expedition", False,
+                                           "Format JSON invalide")
         except Exception as e:
-            log(f"SimplePrinter: Erreur shipping_update: {e}", level="ERROR")
-            
-    def _handle_test_done(self, payload_str):
-        """Gère la fin d'un test de batterie."""
-        try:
-            data = json.loads(payload_str)
-            serial_number = data.get("serial_number")
-            timestamp_test_done = data.get("timestamp_test_done")
-            
-            if not all([serial_number, timestamp_test_done]):
-                log("SimplePrinter: Données manquantes pour test_done", level="ERROR")
-                return
-                
-            # Mettre à jour le CSV avec timestamp test
-            csv_success = CSVSerialManager.update_csv_with_test_done_timestamp(serial_number, timestamp_test_done)
-            
-            # Récupérer les détails pour impression
-            found_serial, random_code, _ = CSVSerialManager.get_details_for_reprint_from_csv(serial_number)
-            
-            # Imprimer étiquette standard et expédition
-            print_success = True
-            if found_serial and random_code:
-                print_success &= self._print_main_label(serial_number, random_code)
-            print_success &= self._print_shipping_label(serial_number)
-            
-            if csv_success and print_success:
-                log(f"SimplePrinter: Test terminé traité avec succès: {serial_number}", level="INFO")
-            else:
-                log(f"SimplePrinter: Traitement partiel test_done: {serial_number}", level="WARNING")
-                
-        except json.JSONDecodeError:
-            log("SimplePrinter: Payload JSON invalide pour test_done", level="ERROR")
-        except Exception as e:
-            log(f"SimplePrinter: Erreur test_done: {e}", level="ERROR")
-            
-    def _handle_batch_creation(self, payload_str):
-        """Gère la création de lots d'étiquettes."""
-        try:
-            num_labels = int(payload_str.strip())
-            
-            if num_labels <= 0 or num_labels > 100:  # Limite de sécurité
-                log(f"SimplePrinter: Nombre d'étiquettes invalide: {num_labels}", level="ERROR")
-                return
-                
-            log(f"SimplePrinter: Création de {num_labels} étiquettes en lot", level="INFO")
-            
-            success_count = 0
-            for i in range(num_labels):
-                # Générer les données
-                serial_number = CSVSerialManager.generate_next_serial_number()
-                random_code = CSVSerialManager.generate_random_code()
-                timestamp_iso = datetime.now().isoformat()
-                timestamp_test_done = datetime.now().isoformat()
-                fabrication_date = datetime.now().strftime("%d/%m/%Y")
-                
-                # Enregistrer dans CSV
-                if not CSVSerialManager.add_serial_to_csv(timestamp_iso, serial_number, random_code):
-                    continue
-                    
-                # Mettre à jour test_done
-                CSVSerialManager.update_csv_with_test_done_timestamp(serial_number, timestamp_test_done)
-                
-                # Imprimer les 3 étiquettes
-                success = True
-                success &= self._print_v1_label(serial_number, random_code, fabrication_date)
-                success &= self._print_main_label(serial_number, random_code)
-                success &= self._print_shipping_label(serial_number)
-                
-                if success:
-                    success_count += 1
-                    
-            log(f"SimplePrinter: Lot terminé: {success_count}/{num_labels} étiquettes créées", level="INFO")
-            
-        except ValueError:
-            log(f"SimplePrinter: Nombre invalide pour batch_creation: {payload_str}", level="ERROR")
-        except Exception as e:
-            log(f"SimplePrinter: Erreur batch_creation: {e}", level="ERROR")
-            
+            log(f"MinimalPrinter: EXPEDITION - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("expedition", False,
+                                           f"Erreur: {str(e)[:50]}")
+
     def _print_v1_label(self, serial_number, random_code, fabrication_date):
         """Imprime une étiquette V1."""
-        zpl_command = LabelTemplates.get_v1_label_zpl(serial_number, random_code, fabrication_date)
+        zpl_command = LabelTemplates.get_v1_label_zpl(serial_number,
+                                                      random_code,
+                                                      fabrication_date)
         return self._send_zpl_to_printer(zpl_command, f"V1 {serial_number}")
-        
+
     def _print_main_label(self, serial_number, random_code):
         """Imprime une étiquette principale."""
-        zpl_command = LabelTemplates.get_main_label_zpl(serial_number, random_code)
+        zpl_command = LabelTemplates.get_main_label_zpl(
+            serial_number, random_code)
         return self._send_zpl_to_printer(zpl_command, f"Main {serial_number}")
-        
+
     def _print_shipping_label(self, serial_number):
         """Imprime une étiquette d'expédition."""
         zpl_command = LabelTemplates.get_shipping_label_zpl(serial_number)
-        return self._send_zpl_to_printer(zpl_command, f"Shipping {serial_number}")
-        
+        return self._send_zpl_to_printer(zpl_command,
+                                         f"Shipping {serial_number}")
+
     def _send_zpl_to_printer(self, zpl_command, description=""):
-        """
-        Envoie une commande ZPL à l'imprimante.
-        
-        Args:
-            zpl_command (str): Commande ZPL à envoyer
-            description (str): Description pour les logs
-            
-        Returns:
-            bool: True si succès, False sinon
-        """
+        """Envoie une commande ZPL à l'imprimante."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
-            sock.connect((PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
+            sock.connect(
+                (PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
             sock.sendall(zpl_command.encode('utf-8'))
             sock.close()
-            
-            log(f"SimplePrinter: Impression réussie: {description}", level="INFO")
+
+            log(f"MinimalPrinter: Impression réussie: {description}",
+                level="DEBUG")
             return True
-            
+
         except socket.timeout:
-            log(f"SimplePrinter: Timeout impression: {description}", level="ERROR")
+            log(f"MinimalPrinter: Timeout impression: {description}",
+                level="ERROR")
             return False
         except socket.error as e:
-            log(f"SimplePrinter: Erreur socket impression {description}: {e}", level="ERROR")
+            log(f"MinimalPrinter: Erreur socket impression {description}: {e}",
+                level="ERROR")
             return False
         except Exception as e:
-            log(f"SimplePrinter: Erreur impression {description}: {e}", level="ERROR")
+            log(f"MinimalPrinter: Erreur impression {description}: {e}",
+                level="ERROR")
             return False
-            
-    def _update_printer_status(self):
-        """Met à jour et publie le statut de l'imprimante."""
+
+    def _publish_printer_status(self):
+        """Publie le statut de l'imprimante pour l'UI."""
         try:
-            # Test simple de connexion
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2.0)  # Timeout court pour le test
-            sock.connect((PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
-            sock.close()
-            
-            new_status = "on"
-            
-        except Exception:
-            new_status = "off"
-            
-        # Publier seulement si le statut a changé
-        if new_status != self.printer_status:
-            self.printer_status = new_status
-            
+            status_info = self._check_printer_status()
+
+            # Publier statut simple pour compatibilité
+            simple_status = "on" if status_info['ready'] else "off"
             if self.mqtt_client and self.mqtt_client.is_connected():
-                self.mqtt_client.publish("printer/status", new_status, qos=1, retain=True)
-                log(f"SimplePrinter: Statut publié: {new_status}", level="INFO")
+                self.mqtt_client.publish("printer/status",
+                                         simple_status,
+                                         qos=1,
+                                         retain=True)
+
+                # Publier statut détaillé pour l'UI
+                detailed_status = {
+                    'status': status_info['status'],
+                    'message': status_info['message'],
+                    'ready': status_info['ready'],
+                    'timestamp': datetime.now().isoformat()
+                }
+                self.mqtt_client.publish("printer/status/detailed",
+                                         json.dumps(detailed_status),
+                                         qos=1,
+                                         retain=True)
+
+                log(f"MinimalPrinter: Statut publié - {status_info['message']}",
+                    level="INFO")
+
+        except Exception as e:
+            log(f"MinimalPrinter: Erreur publication statut: {e}",
+                level="ERROR")
+
+    def _publish_operation_result(self, operation, success, message):
+        """Publie le résultat d'une opération pour l'UI."""
+        try:
+            if self.mqtt_client and self.mqtt_client.is_connected():
+                result = {
+                    'operation': operation,
+                    'success': success,
+                    'message': message,
+                    'timestamp': datetime.now().isoformat()
+                }
+                self.mqtt_client.publish("printer/operation/result",
+                                         json.dumps(result),
+                                         qos=1)
+
+        except Exception as e:
+            log(f"MinimalPrinter: Erreur publication résultat: {e}",
+                level="ERROR")
 
 
 def main():
     """Point d'entrée principal."""
     try:
-        log("SimplePrinter: Démarrage du service d'impression simplifié", level="INFO")
-        printer = SimplePrinter()
+        log("MinimalPrinter: Démarrage du service d'impression minimal",
+            level="INFO")
+        log("MinimalPrinter: Fonctions disponibles - CREATE, REPRINT, EXPEDITION",
+            level="INFO")
+
+        printer = MinimalPrinter()
         printer.start()
-        
+
     except KeyboardInterrupt:
-        log("SimplePrinter: Arrêt demandé par l'utilisateur", level="INFO")
+        log("MinimalPrinter: Arrêt demandé par l'utilisateur", level="INFO")
     except Exception as e:
-        log(f"SimplePrinter: Erreur critique: {e}", level="ERROR")
+        log(f"MinimalPrinter: Erreur critique: {e}", level="ERROR")
 
 
 if __name__ == "__main__":

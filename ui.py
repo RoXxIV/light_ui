@@ -27,7 +27,7 @@ ctk.set_appearance_mode("dark")
 
 class SimpleApp(ctk.CTk):
     """
-    Interface utilisateur pour scanning, impression et messages utilisateur.
+    Interface utilisateur.
     """
 
     def __init__(self):

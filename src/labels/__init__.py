@@ -12,6 +12,5 @@ Ce module regroupe :
 from .label_templates import LabelTemplates
 from .printer_config import PrinterConfig
 from .csv_serial_manager import CSVSerialManager
-from .message_handlers import get_topic_handlers
 
-__all__ = ['LabelTemplates', 'PrinterConfig', 'CSVSerialManager', 'get_topic_handlers']
+__all__ = ['LabelTemplates', 'PrinterConfig', 'CSVSerialManager']

@@ -94,7 +94,7 @@ class EmailTemplates:
         total_batteries = len(serial_numbers)
 
         # Corps principal avec total
-        corps_principal = f"Bonjour,\n\nVoici la liste des {total_batteries} batterie{'s' if total_batteries > 1 else ''} marquée{'s' if total_batteries > 1 else ''} comme expédiée{'s' if total_batteries > 1 else ''} le {date_formatee}:\n\n"
+        corps_principal = f"Bonjour,\n\nVoici la liste des batteries marquées comme expédiées le {date_formatee}:\n\n"
 
         # Liste des batteries (numérotée)
         for i, serial in enumerate(serial_numbers, 1):
@@ -145,17 +145,17 @@ class EmailTemplates:
             <body>
                 <p>Bonjour,</p>
                 <p>Voici la liste des <strong>{total_batteries} batterie{'s' if total_batteries > 1 else ''}</strong> marquée{'s' if total_batteries > 1 else ''} comme expédiée{'s' if total_batteries > 1 else ''} le <strong>{date_formatee}</strong>:</p>
-                <ol>
+                <ul>
             """
 
-        # Liste des batteries (numérotée automatiquement par <ol>)
+        # Liste des batteries (numérotée automatiquement par <ul>)
         html_liste = ""
         for serial in serial_numbers:
             html_liste += f"<li><strong>{serial}</strong></li>"
 
         # Fermeture de la liste avec récapitulatif
         html_corps = f"""
-                </ol>
+                </ul>
                 
                 <div style="margin-top: 20px; padding: 15px; background-color: #f0f8ff; border-left: 4px solid #4CAF50;">
                     <p style="margin: 0; font-weight: bold; font-size: 16px;">
