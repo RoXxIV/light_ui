@@ -334,6 +334,7 @@ class MinimalPrinter:
                 MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP,  # EXPEDITION
                 PrinterConfig.MQTT_TOPIC_SAV_ENTRY,  # SAV ENTRY
                 PrinterConfig.MQTT_TOPIC_SAV_DEPARTURE,  # SAV DEPARTURE
+                PrinterConfig.MQTT_TOPIC_CREATE_QR,  # QR
             ]
 
             for topic in topics:
@@ -371,6 +372,9 @@ class MinimalPrinter:
 
             elif topic == PrinterConfig.MQTT_TOPIC_SAV_DEPARTURE:
                 self._handle_sav_departure(payload_str)
+
+            elif topic == PrinterConfig.MQTT_TOPIC_CREATE_QR:
+                self._handle_create_qr(payload_str)
 
             else:
                 log(f"MinimalPrinter: Topic non géré: {topic}",
@@ -751,6 +755,68 @@ class MinimalPrinter:
         except Exception as e:
             log(f"MinimalPrinter: Erreur publication résultat: {e}",
                 level="ERROR")
+
+    def _handle_create_qr(self, payload_str):
+        """Gère la création de QR personnalisé."""
+        try:
+            data = json.loads(payload_str)
+            qr_text = data.get("qr_text", "").strip()
+
+            if not qr_text:
+                log("MinimalPrinter: CREATE_QR - Texte QR manquant",
+                    level="ERROR")
+                return
+
+            # Envoyer le ZPL à l'imprimante
+            success = self._send_qr_zpl_to_printer(qr_text)
+
+            if success:
+                log(f"MinimalPrinter: QR imprimé avec succès: {qr_text}",
+                    level="INFO")
+            else:
+                log(f"MinimalPrinter: Échec impression QR: {qr_text}",
+                    level="ERROR")
+
+        except json.JSONDecodeError:
+            log("MinimalPrinter: CREATE_QR - Payload JSON invalide",
+                level="ERROR")
+        except Exception as e:
+            log(f"MinimalPrinter: CREATE_QR - Erreur: {e}", level="ERROR")
+
+    def _send_qr_zpl_to_printer(self, qr_text):
+        """Envoie ZPL pour QR personnalisé."""
+        zpl_command = f"""
+    ^XA
+    ~TA000
+    ~JSN
+    ^LT0
+    ^MNW
+    ^MTT
+    ^PON
+    ^PMN
+    ^LH0,0
+    ^JMA
+    ^PR4,4
+    ~SD15
+    ^JUS
+    ^LRN
+    ^CI27
+    ^PA0,1,1,0
+    ^XZ
+    ^XA
+    ^MMT
+    ^PW815
+    ^LL200
+    ^LS0
+    ^FT50,50^A0N,30,30^FH\\^CI28^FDQR CODE:^FS^CI27
+    ^FT50,90^A0N,40,40^FH\\^CI28^FD{qr_text}^FS^CI27
+    ^FO500,20
+    ^BQN,2,8
+    ^FH\\^FDLA,{qr_text}^FS
+    ^PQ1,0,1,Y
+    ^XZ
+    """
+        return self._send_zpl_to_printer(zpl_command, f"QR {qr_text}")
 
 
 def main():

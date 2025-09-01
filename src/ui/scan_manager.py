@@ -25,6 +25,8 @@ class ScanManager:
     STATE_AWAIT_EXPEDITION_CONFIRM = 4
     STATE_AWAIT_SAV_SERIAL = 5
     STATE_AWAIT_SAV_CONFIRM = 6
+    STATE_AWAIT_QR_TEXT = 7
+    STATE_AWAIT_QR_CONFIRM = 8
 
     # === CONSTANTES ===
     SERIAL_PATTERN = r"RW-48v271[A-Za-z0-9]{4}"
@@ -45,6 +47,7 @@ class ScanManager:
         self.serials_for_expedition = []
         self.expedition_mode_active = False
         self.serial_for_sav = None
+        self.qr_text_to_print = None
 
         # Timer de timeout
         self.timeout_timer_id = None
@@ -85,6 +88,8 @@ class ScanManager:
             self._handle_await_expedition_confirm,
             self.STATE_AWAIT_SAV_SERIAL: self._handle_await_sav_serial,
             self.STATE_AWAIT_SAV_CONFIRM: self._handle_await_sav_confirm,
+            self.STATE_AWAIT_QR_TEXT: self._handle_await_qr_text,
+            self.STATE_AWAIT_QR_CONFIRM: self._handle_await_qr_confirm,
         }
 
         handler = handlers.get(self.current_state)
@@ -117,6 +122,9 @@ class ScanManager:
         # === SAV ===
         elif text_lower == "sav":
             return self._handle_sav_command()
+
+        elif text_lower == "new qr":
+            return self._handle_new_qr_command()
 
         return False
 
@@ -651,3 +659,55 @@ class ScanManager:
     def _update_ui(self, msg1, msg2):
         """Met à jour les labels de réponse."""
         self.app.update_response_labels(msg1, msg2)
+
+    def _handle_new_qr_command(self):
+        """Gère la commande new qr."""
+        if not is_printer_service_running():
+            self._update_ui("❌ Service d'impression inactif", "QR impossible")
+            self.app.add_message("❌ Service d'impression non détecté", "error")
+            return True
+
+        self._change_state(self.STATE_AWAIT_QR_TEXT)
+        self._update_ui("📄 Mode QR", "Saisir le texte pour le QR code")
+        self.app.add_message("📄 Mode création QR activé", "info")
+        self._start_timeout()
+        return True
+
+    def _handle_await_qr_text(self, text):
+        """Gère l'attente du texte pour QR."""
+        qr_text = text.strip()
+        if not qr_text:
+            self._update_ui("❌ Texte vide", "Veuillez saisir un texte")
+            self.app.add_message("❌ Texte QR ne peut pas être vide", "error")
+            self._delayed_reset(2000)
+            return
+
+        self.qr_text_to_print = qr_text
+        self._change_state(self.STATE_AWAIT_QR_CONFIRM)
+
+        self._update_ui(f"✅ QR: {qr_text}", "Scanner 'new qr' pour confirmer")
+        self.app.add_message(f"✅ QR sélectionné: {qr_text}", "success")
+        self._start_timeout()
+
+    def _handle_await_qr_confirm(self, text):
+        """Gère la confirmation QR."""
+        if text.lower().strip() != "new qr":
+            self._update_ui("❌ Confirmation incorrecte",
+                            "Scanner 'new qr' pour confirmer")
+            self.app.add_message(f"❌ Attendu 'new qr', reçu: {text}", "error")
+            self._delayed_reset(2000)
+            return
+
+        # Envoyer la demande QR via MQTT
+        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
+            payload = json.dumps({"qr_text": self.qr_text_to_print})
+            self.app.mqtt_client.publish("printer/create_qr", payload, qos=1)
+
+            self._update_ui("📄 QR envoyé", f"Texte: {self.qr_text_to_print}")
+            self.app.add_message(f"📄 QR créé: {self.qr_text_to_print}",
+                                 "success")
+        else:
+            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer le QR")
+            self.app.add_message("❌ MQTT déconnecté - QR échoué", "error")
+
+        self._reset_scan()

@@ -20,11 +20,12 @@ class PrinterConfig:
     MQTT_TOPIC_CREATE_BATCH_LABELS = "printer/create_batch_labels"
     MQTT_TOPIC_SAV_ENTRY = "printer/sav_entry"
     MQTT_TOPIC_SAV_DEPARTURE = "printer/sav_departure"
+    MQTT_TOPIC_CREATE_QR = "printer/create_qr"
     # --- Configuration Imprimante ---
     PRINTER_IP = "192.168.1.100"  # ip de l'imprimante
     PRINTER_PORT = 9100
     # --- Configuration Version Software ---
-    SOFTWARE_VERSION = "1.01"  # Version dynamique du software
+    SOFTWARE_VERSION = "1.03"  # Version dynamique du software
     # --- Intervalles et Timeouts (secondes) ---
     RETRY_DELAY_ON_ERROR_S = 10
     POLL_DELAY_WHEN_IDLE_S = 1
