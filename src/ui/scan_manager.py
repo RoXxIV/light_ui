@@ -23,6 +23,8 @@ class ScanManager:
     STATE_AWAIT_REPRINT_CONFIRM = 2
     STATE_AWAIT_EXPEDITION_SERIAL = 3
     STATE_AWAIT_EXPEDITION_CONFIRM = 4
+    STATE_AWAIT_SAV_SERIAL = 5
+    STATE_AWAIT_SAV_CONFIRM = 6
 
     # === CONSTANTES ===
     SERIAL_PATTERN = r"RW-48v271[A-Za-z0-9]{4}"
@@ -42,6 +44,7 @@ class ScanManager:
         self.serial_to_reprint = None
         self.serials_for_expedition = []
         self.expedition_mode_active = False
+        self.serial_for_sav = None
 
         # Timer de timeout
         self.timeout_timer_id = None
@@ -72,16 +75,16 @@ class ScanManager:
 
         # === DISPATCH SELON L'ÉTAT ===
         handlers = {
-            self.STATE_IDLE:
-            self._handle_idle_state,
-            self.STATE_AWAIT_REPRINT_SERIAL:
-            self._handle_await_reprint_serial,
+            self.STATE_IDLE: self._handle_idle_state,
+            self.STATE_AWAIT_REPRINT_SERIAL: self._handle_await_reprint_serial,
             self.STATE_AWAIT_REPRINT_CONFIRM:
             self._handle_await_reprint_confirm,
             self.STATE_AWAIT_EXPEDITION_SERIAL:
             self._handle_await_expedition_serial,
             self.STATE_AWAIT_EXPEDITION_CONFIRM:
             self._handle_await_expedition_confirm,
+            self.STATE_AWAIT_SAV_SERIAL: self._handle_await_sav_serial,
+            self.STATE_AWAIT_SAV_CONFIRM: self._handle_await_sav_confirm,
         }
 
         handler = handlers.get(self.current_state)
@@ -110,6 +113,10 @@ class ScanManager:
         # === EXPEDITION ===
         elif text_lower == "expedition":
             return self._handle_expedition_command()
+
+        # === SAV ===
+        elif text_lower == "sav":
+            return self._handle_sav_command()
 
         return False
 
@@ -288,6 +295,8 @@ class ScanManager:
         if serial not in self.serials_for_expedition:
             self.serials_for_expedition.append(serial)
             self.app.add_message(f"➕ Ajouté: {serial}", "success")
+            #Vérifier si c'est un retour SAV
+            self._check_and_handle_sav_return(serial)
         else:
             self.app.add_message(f"⚠️ Déjà dans la liste: {serial}", "warning")
 
@@ -295,6 +304,27 @@ class ScanManager:
         self._update_ui(
             f"📦 {count} batterie(s) scannée(s)",
             "Scanner plus de séries ou 'expedition' pour terminer")
+
+    def _check_and_handle_sav_return(self, serial):
+        """
+        Vérifie si une batterie est en SAV et la traite automatiquement.
+        
+        Args:
+            serial (str): Numéro de série à vérifier
+        """
+        try:
+            from src.labels import CSVSerialManager
+
+            if CSVSerialManager.is_battery_in_sav(serial):
+                self.app.add_message(f"🔧 Retour SAV détecté: {serial}", "info")
+
+                # Préparer pour la sortie SAV automatique lors de la finalisation
+                log(f"ScanManager: Batterie {serial} marquée pour sortie SAV automatique",
+                    level="INFO")
+
+        except Exception as e:
+            log(f"ScanManager: Erreur vérification SAV pour {serial}: {e}",
+                level="ERROR")
 
     def _handle_expedition_finalize(self):
         """Finalise l'expédition."""
@@ -315,27 +345,53 @@ class ScanManager:
 
         # Traiter l'expédition
         timestamp_iso = datetime.now().isoformat()
-        topic = "printer/update_shipping_timestamp"
+        topic_expedition = "printer/update_shipping_timestamp"
+        topic_sav_departure = "printer/sav_departure"
 
         success_count = 0
-        for serial in self.serials_for_expedition:
-            payload = {
-                "serial_number": serial,
-                "timestamp_expedition": timestamp_iso
-            }
+        sav_count = 0
 
+        for serial in self.serials_for_expedition:
             try:
-                self.app.mqtt_client.publish(topic, json.dumps(payload), qos=1)
+                # 1. Traitement expédition standard
+                payload_expedition = {
+                    "serial_number": serial,
+                    "timestamp_expedition": timestamp_iso
+                }
+                self.app.mqtt_client.publish(topic_expedition,
+                                             json.dumps(payload_expedition),
+                                             qos=1)
                 success_count += 1
+
+                # 2. NOUVEAU: Traitement SAV si applicable
+                from src.labels import CSVSerialManager
+                if CSVSerialManager.is_battery_in_sav(serial):
+                    payload_sav = {
+                        "serial_number": serial,
+                        "timestamp_depart": timestamp_iso
+                    }
+                    self.app.mqtt_client.publish(topic_sav_departure,
+                                                 json.dumps(payload_sav),
+                                                 qos=1)
+                    sav_count += 1
+                    self.app.add_message(f"  🔧 Sortie SAV: {serial}", "info")
+
             except Exception as e:
                 log(f"ScanManager: Erreur expédition {serial}: {e}",
                     level="ERROR")
 
         if success_count == len(self.serials_for_expedition):
-            self._update_ui(f"✅ {success_count} batteries expédiées",
-                            "Mise à jour CSV et email en cours...")
+            msg = f"✅ {success_count} batteries expédiées"
+            if sav_count > 0:
+                msg += f" (dont {sav_count} retours SAV)"
+
+            self._update_ui(msg, "Mise à jour CSV et email en cours...")
             self.app.add_message(
                 f"✅ Expédition réussie: {success_count} batteries", "success")
+
+            if sav_count > 0:
+                self.app.add_message(
+                    f"🔧 Sorties SAV automatiques: {sav_count}", "success")
 
             # Afficher la liste dans les messages
             for serial in self.serials_for_expedition:
@@ -360,6 +416,71 @@ class ScanManager:
         self._update_ui("❌ Expédition annulée", f"{count} batteries ignorées")
         self.app.add_message(f"❌ Expédition annulée ({count} batteries)",
                              "warning")
+        self._reset_scan()
+
+    def _handle_sav_command(self):
+        """Gère la commande SAV."""
+        if not is_printer_service_running():
+            self._update_ui("❌ Service d'impression inactif", "SAV impossible")
+            self.app.add_message("❌ Service d'impression non détecté", "error")
+            return True
+
+        self._change_state(self.STATE_AWAIT_SAV_SERIAL)
+        self._update_ui("🔧 Mode SAV",
+                        "Scanner le numéro de série à enregistrer en SAV")
+        self.app.add_message("🔧 Mode SAV activé", "info")
+        self._start_timeout()
+        return True
+
+    def _handle_await_sav_serial(self, text):
+        """Gère l'attente du serial pour SAV."""
+        serial = self._extract_serial(text)
+        if not serial:
+            self._update_ui("❌ Série invalide",
+                            "Format attendu: RW-48v271XXXX")
+            self.app.add_message(f"❌ Format de série invalide: {text}",
+                                 "error")
+            self._delayed_reset(2000)
+            return
+
+        self.serial_for_sav = serial
+        self._change_state(self.STATE_AWAIT_SAV_CONFIRM)
+
+        self._update_ui(f"✅ Série SAV: {serial}",
+                        "Scanner 'sav' pour confirmer l'entrée")
+        self.app.add_message(f"✅ Série sélectionnée pour SAV: {serial}",
+                             "success")
+        self._start_timeout()
+
+    def _handle_await_sav_confirm(self, text):
+        """Gère la confirmation SAV."""
+        if text.lower().strip() != "sav":
+            self._update_ui("❌ Confirmation incorrecte",
+                            "Scanner 'sav' pour confirmer")
+            self.app.add_message(f"❌ Attendu 'sav', reçu: {text}", "error")
+            self._delayed_reset(2000)
+            return
+
+        # Envoyer la demande SAV via MQTT
+        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
+            payload = json.dumps({
+                "serial_number":
+                self.serial_for_sav,
+                "timestamp_sav_arrivee":
+                datetime.now().isoformat(),
+                "technicien":
+                "Scanner_User"  # Optionnel pour futur usage
+            })
+            self.app.mqtt_client.publish("printer/sav_entry", payload, qos=1)
+
+            self._update_ui("🔧 SAV enregistré",
+                            f"Série: {self.serial_for_sav}")
+            self.app.add_message(
+                f"🔧 SAV enregistré pour {self.serial_for_sav}", "success")
+        else:
+            self._update_ui("❌ Erreur MQTT", "Impossible d'enregistrer le SAV")
+            self.app.add_message("❌ MQTT déconnecté - SAV échoué", "error")
+
         self._reset_scan()
 
     def _extract_serial(self, text):
@@ -414,6 +535,7 @@ class ScanManager:
         self.serial_to_reprint = None
         self.serials_for_expedition = []
         self.expedition_mode_active = False
+        self.serial_for_sav = None
 
         self._cancel_timeout()
 

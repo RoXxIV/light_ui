@@ -66,7 +66,7 @@ class MinimalPrinter:
                 log(f"MinimalPrinter: Connexion MQTT {PrinterConfig.MQTT_BROKER_HOST}:{PrinterConfig.MQTT_BROKER_PORT}",
                     level="INFO")
                 self.mqtt_client.connect(PrinterConfig.MQTT_BROKER_HOST,
-                                         PrinterConfig.MQTT_BROKER_PORT, 60)
+                                         PrinterConfig.MQTT_BROKER_PORT, 300)
 
                 # Démarrer la boucle (bloquante)
                 self.mqtt_client.loop_forever()
@@ -331,7 +331,9 @@ class MinimalPrinter:
                 PrinterConfig.MQTT_TOPIC_CREATE_LABEL,  # CREATE
                 PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT,  # REPRINT
                 PrinterConfig.
-                MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP  # EXPEDITION
+                MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP,  # EXPEDITION
+                PrinterConfig.MQTT_TOPIC_SAV_ENTRY,  # SAV ENTRY
+                PrinterConfig.MQTT_TOPIC_SAV_DEPARTURE,  # SAV DEPARTURE
             ]
 
             for topic in topics:
@@ -354,7 +356,7 @@ class MinimalPrinter:
             log(f"MinimalPrinter: Message reçu sur {topic}: {payload_str}",
                 level="INFO")
 
-            # Router vers les 3 handlers essentiels
+            # Router vers les handlers
             if topic == PrinterConfig.MQTT_TOPIC_CREATE_LABEL:
                 self._handle_create(payload_str)
 
@@ -363,6 +365,12 @@ class MinimalPrinter:
 
             elif topic == PrinterConfig.MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP:
                 self._handle_expedition(payload_str)
+
+            elif topic == PrinterConfig.MQTT_TOPIC_SAV_ENTRY:
+                self._handle_sav_entry(payload_str)
+
+            elif topic == PrinterConfig.MQTT_TOPIC_SAV_DEPARTURE:
+                self._handle_sav_departure(payload_str)
 
             else:
                 log(f"MinimalPrinter: Topic non géré: {topic}",
@@ -609,6 +617,122 @@ class MinimalPrinter:
         except Exception as e:
             log(f"MinimalPrinter: Erreur publication statut: {e}",
                 level="ERROR")
+
+    def _handle_sav_entry(self, payload_str):
+        """
+        SAV ENTRY : Enregistrer l'arrivée d'une batterie en SAV.
+        Format: {"serial_number": "RW-48v271XXXX", "timestamp_sav_arrivee": "2025-01-01T12:00:00", "technicien": "Scanner_User"}
+        """
+        try:
+            data = json.loads(payload_str)
+            serial_number = data.get("serial_number", "").strip()
+            timestamp_arrivee = data.get("timestamp_sav_arrivee", "").strip()
+            technicien = data.get("technicien",
+                                  "").strip()  # Optionnel pour futur usage
+
+            if not all([serial_number, timestamp_arrivee]):
+                log("MinimalPrinter: SAV_ENTRY - Données manquantes",
+                    level="ERROR")
+                self._publish_operation_result("sav_entry", False,
+                                               "Données manquantes")
+                return
+
+            # Vérifier que le serial existe dans le CSV principal
+            from src.labels import CSVSerialManager
+            found_serial, _, _ = CSVSerialManager.get_details_for_reprint_from_csv(
+                serial_number)
+
+            if not found_serial:
+                log(f"MinimalPrinter: SAV_ENTRY - Serial {serial_number} non trouvé dans le système",
+                    level="ERROR")
+                self._publish_operation_result(
+                    "sav_entry", False, f"Serial {serial_number} inexistant")
+                return
+
+            # Vérifier si déjà en SAV
+            if CSVSerialManager.is_battery_in_sav(serial_number):
+                log(f"MinimalPrinter: SAV_ENTRY - {serial_number} déjà en SAV",
+                    level="WARNING")
+                self._publish_operation_result("sav_entry", False,
+                                               f"{serial_number} déjà en SAV")
+                return
+
+            # Enregistrer l'entrée SAV
+            success = CSVSerialManager.add_sav_entry(timestamp_arrivee,
+                                                     serial_number)
+
+            if success:
+                log(f"MinimalPrinter: SAV_ENTRY réussie pour {serial_number} par {technicien}",
+                    level="INFO")
+                self._publish_operation_result(
+                    "sav_entry", True, f"SAV enregistré: {serial_number}")
+            else:
+                log(f"MinimalPrinter: SAV_ENTRY - Échec enregistrement {serial_number}",
+                    level="ERROR")
+                self._publish_operation_result("sav_entry", False,
+                                               f"Échec SAV: {serial_number}")
+
+        except json.JSONDecodeError:
+            log("MinimalPrinter: SAV_ENTRY - Payload JSON invalide",
+                level="ERROR")
+            self._publish_operation_result("sav_entry", False,
+                                           "Format JSON invalide")
+        except Exception as e:
+            log(f"MinimalPrinter: SAV_ENTRY - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("sav_entry", False,
+                                           f"Erreur: {str(e)[:50]}")
+
+    def _handle_sav_departure(self, payload_str):
+        """
+        SAV DEPARTURE : Enregistrer la sortie d'une batterie du SAV (lors de l'expédition).
+        Format: {"serial_number": "RW-48v271XXXX", "timestamp_depart": "2025-01-01T12:00:00"}
+        """
+        try:
+            data = json.loads(payload_str)
+            serial_number = data.get("serial_number", "").strip()
+            timestamp_depart = data.get("timestamp_depart", "").strip()
+
+            if not all([serial_number, timestamp_depart]):
+                log("MinimalPrinter: SAV_DEPARTURE - Données manquantes",
+                    level="ERROR")
+                self._publish_operation_result("sav_departure", False,
+                                               "Données manquantes")
+                return
+
+            # Vérifier que la batterie est effectivement en SAV
+            from src.labels import CSVSerialManager
+            if not CSVSerialManager.is_battery_in_sav(serial_number):
+                log(f"MinimalPrinter: SAV_DEPARTURE - {serial_number} n'est pas en SAV",
+                    level="WARNING")
+                self._publish_operation_result("sav_departure", False,
+                                               f"{serial_number} pas en SAV")
+                return
+
+            # Enregistrer la sortie SAV
+            success = CSVSerialManager.update_sav_departure(
+                serial_number, timestamp_depart)
+
+            if success:
+                log(f"MinimalPrinter: SAV_DEPARTURE réussie pour {serial_number}",
+                    level="INFO")
+                self._publish_operation_result("sav_departure", True,
+                                               f"Sortie SAV: {serial_number}")
+            else:
+                log(f"MinimalPrinter: SAV_DEPARTURE - Échec sortie {serial_number}",
+                    level="ERROR")
+                self._publish_operation_result(
+                    "sav_departure", False,
+                    f"Échec sortie SAV: {serial_number}")
+
+        except json.JSONDecodeError:
+            log("MinimalPrinter: SAV_DEPARTURE - Payload JSON invalide",
+                level="ERROR")
+            self._publish_operation_result("sav_departure", False,
+                                           "Format JSON invalide")
+        except Exception as e:
+            log(f"MinimalPrinter: SAV_DEPARTURE - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("sav_departure", False,
+                                           f"Erreur: {str(e)[:50]}")
 
     def _publish_operation_result(self, operation, success, message):
         """Publie le résultat d'une opération pour l'UI."""

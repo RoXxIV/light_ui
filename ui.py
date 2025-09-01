@@ -216,7 +216,7 @@ class SimpleApp(ctk.CTk):
 
         self.info_label = ctk.CTkLabel(
             self.frame_info,
-            text="Commandes: create <nom> | reprint | expedition",
+            text="Commandes: create <nom> | reprint | expedition | sav",
             font=("Helvetica", 12),
             text_color="#808080")
         self.info_label.pack(pady=5)
@@ -236,22 +236,30 @@ class SimpleApp(ctk.CTk):
 
                 client = mqtt.Client(
                     client_id=f"simple_ui_{os.getpid()}",
-                    callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+                    callback_api_version=mqtt.
+                    CallbackAPIVersion.  # type: ignore
+                    VERSION1)
 
                 client.on_connect = self._on_connect
                 client.on_message = self._on_message
                 client.on_disconnect = self._on_disconnect
 
-                client.connect(MQTT_BROKER, MQTT_PORT, 60)
+                client.connect(MQTT_BROKER, MQTT_PORT, 300)
                 self.mqtt_client = client
 
                 client.loop_forever()
-                break
+                # Pas de break ! La boucle while continue en cas de déconnexion
+                #break
 
+            except (socket.timeout, TimeoutError, ConnectionRefusedError,
+                    socket.gaierror, OSError) as e:
+                log(f"SimpleUI: Erreur réseau MQTT: {e}", level="WARNING")
+                self.update_status("mqtt", "❌ MQTT: Erreur réseau", "red")
             except Exception as e:
-                log(f"SimpleUI: Erreur MQTT: {e}", level="ERROR")
+                log(f"SimpleUI: Erreur MQTT inattendue: {e}", level="ERROR")
                 self.update_status("mqtt", "❌ MQTT: Erreur", "red")
-                time.sleep(5)
+
+            time.sleep(10)
 
     def _on_connect(self, client, userdata, flags, rc):
         """Callback connexion MQTT."""

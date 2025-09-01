@@ -18,6 +18,8 @@ class PrinterConfig:
     MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP = "printer/update_shipping_timestamp"
     MQTT_TOPIC_TEST_DONE = "printer/test_done"
     MQTT_TOPIC_CREATE_BATCH_LABELS = "printer/create_batch_labels"
+    MQTT_TOPIC_SAV_ENTRY = "printer/sav_entry"
+    MQTT_TOPIC_SAV_DEPARTURE = "printer/sav_departure"
     # --- Configuration Imprimante ---
     PRINTER_IP = "192.168.1.100"  # ip de l'imprimante
     PRINTER_PORT = 9100
