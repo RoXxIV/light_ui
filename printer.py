@@ -36,6 +36,9 @@ class MinimalPrinter:
         # Initialiser le CSV des séries
         CSVSerialManager.initialize_serial_csv()
 
+        # NOUVEAU: Initialiser le CSV SAV
+        CSVSerialManager.initialize_sav_csv()
+
         log("MinimalPrinter: Service initialisé avec file d'attente",
             level="INFO")
 
