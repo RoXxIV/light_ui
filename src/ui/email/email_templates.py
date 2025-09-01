@@ -139,12 +139,18 @@ class EmailTemplates:
         """
         total_batteries = len(serial_numbers)
 
+        # Définir la description en fonction du nombre de batteries
+        if total_batteries > 1:
+            description = f"des <strong>{total_batteries} batteries</strong> marquées comme expédiées"
+        else:
+            description = "de la batterie marquée comme expédiée"
+
         # En-tête et introduction avec total
         html_intro = f"""
             <html>
             <body>
                 <p>Bonjour,</p>
-                <p>Voici la liste des <strong>{total_batteries} batterie{'s' if total_batteries > 1 else ''}</strong> marquée{'s' if total_batteries > 1 else ''} comme expédiée{'s' if total_batteries > 1 else ''} le <strong>{date_formatee}</strong>:</p>
+                <p>Voici la liste {description} le <strong>{date_formatee}</strong>:</p>
                 <ul>
             """
 

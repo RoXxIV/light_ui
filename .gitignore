@@ -2,4 +2,5 @@
 venv/
 src/logs
 printed_serials.csv
+sav_batteries.csv
 src/ui/email/email_config.json

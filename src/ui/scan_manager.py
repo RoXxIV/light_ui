@@ -353,19 +353,13 @@ class ScanManager:
 
         for serial in self.serials_for_expedition:
             try:
-                # 1. Traitement expédition standard
-                payload_expedition = {
-                    "serial_number": serial,
-                    "timestamp_expedition": timestamp_iso
-                }
-                self.app.mqtt_client.publish(topic_expedition,
-                                             json.dumps(payload_expedition),
-                                             qos=1)
-                success_count += 1
-
-                # 2. NOUVEAU: Traitement SAV si applicable
                 from src.labels import CSVSerialManager
-                if CSVSerialManager.is_battery_in_sav(serial):
+
+                # Vérifier AVANT si c'est une batterie SAV
+                is_sav_battery = CSVSerialManager.is_battery_in_sav(serial)
+
+                if is_sav_battery:
+                    # SEULEMENT sortie SAV, PAS d'expédition normale
                     payload_sav = {
                         "serial_number": serial,
                         "timestamp_depart": timestamp_iso
@@ -374,7 +368,19 @@ class ScanManager:
                                                  json.dumps(payload_sav),
                                                  qos=1)
                     sav_count += 1
-                    self.app.add_message(f"  🔧 Sortie SAV: {serial}", "info")
+                    self.app.add_message(f"  Sortie SAV: {serial}", "info")
+                else:
+                    # Expédition normale uniquement
+                    payload_expedition = {
+                        "serial_number": serial,
+                        "timestamp_expedition": timestamp_iso
+                    }
+                    self.app.mqtt_client.publish(
+                        topic_expedition,
+                        json.dumps(payload_expedition),
+                        qos=1)
+
+                success_count += 1
 
             except Exception as e:
                 log(f"ScanManager: Erreur expédition {serial}: {e}",
