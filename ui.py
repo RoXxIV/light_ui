@@ -13,6 +13,7 @@ import time
 import os
 from src.ui.system_utils import log, MQTT_BROKER, MQTT_PORT
 from src.ui.scan_manager import ScanManager
+from src.ui.info_panel import InfoPanel  # Nouveau import
 
 # Import des modules email pour s'assurer qu'ils sont disponibles
 try:
@@ -33,6 +34,9 @@ class SimpleApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # === INITIALISATION DES ATTRIBUTS ===
+        self.mqtt_client = None
+
         # === CONFIGURATION FENÊTRE ===
         self.title("Revaw - Gestion Étiquettes")
         self.geometry("1200x800")
@@ -42,16 +46,17 @@ class SimpleApp(ctk.CTk):
         self.bind("<Return>", self.handle_prompt)
 
         # === CONFIGURATION GRILLE ===
-        self.rowconfigure(0, weight=1)  # Zone messages principale
+        self.rowconfigure(0, weight=1)  # Zone principale (divisée en 2)
         self.rowconfigure(1, weight=0)  # Zone scan
         self.rowconfigure(2, weight=0)  # Zone système
         self.columnconfigure(0, weight=1)
 
+        # === GESTIONNAIRES (CRÉÉS AVANT _setup_ui) ===
+        self.info_panel = InfoPanel(self)
+        self.scan_manager = ScanManager(self)
+
         self._setup_ui()
         self._setup_mqtt()
-
-        # === GESTIONNAIRE DE SCAN ===
-        self.scan_manager = ScanManager(self)
 
         # Vérifier la disponibilité des emails
         if not EMAIL_AVAILABLE:
@@ -62,15 +67,33 @@ class SimpleApp(ctk.CTk):
         # Focus sur l'entrée
         self.after(100, lambda: self.entry_prompt.focus_set())
 
+        # Démarrer les mises à jour d'informations après un court délai
+        self.after(1000, self._start_info_updates)
+
+    def _start_info_updates(self):
+        """Démarre les mises à jour d'informations de manière sécurisée."""
+        try:
+            self.info_panel.start_updates()
+        except Exception as e:
+            log(f"SimpleUI: Erreur démarrage mises à jour infos: {e}",
+                level="ERROR")
+
     def _setup_ui(self):
         """Configure l'interface utilisateur."""
 
-        # === ZONE MESSAGES PRINCIPALE (grande) ===
-        self.frame_messages = ctk.CTkFrame(self, corner_radius=10)
+        # === ZONE PRINCIPALE (divisée en 2 : messages 3/4 + infos 1/4) ===
+        self.frame_main = ctk.CTkFrame(self, corner_radius=10)
+        self.frame_main.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.frame_main.rowconfigure(0, weight=1)
+        self.frame_main.columnconfigure(0, weight=3)  # Zone messages (3/4)
+        self.frame_main.columnconfigure(1, weight=1)  # Zone infos (1/4)
+
+        # === ZONE MESSAGES (3/4 gauche) ===
+        self.frame_messages = ctk.CTkFrame(self.frame_main, corner_radius=10)
         self.frame_messages.grid(row=0,
                                  column=0,
-                                 padx=10,
-                                 pady=10,
+                                 padx=(0, 5),
+                                 pady=0,
                                  sticky="nsew")
         self.frame_messages.rowconfigure(0, weight=1)
         self.frame_messages.columnconfigure(0, weight=1)
@@ -86,7 +109,23 @@ class SimpleApp(ctk.CTk):
                                    pady=10,
                                    sticky="nsew")
 
-        # === ZONE SCAN ===
+        # === ZONE INFORMATIONS (1/4 droite) ===
+        self.frame_info_panel = ctk.CTkFrame(self.frame_main,
+                                             corner_radius=10,
+                                             border_width=1,
+                                             border_color="#404040")
+        self.frame_info_panel.grid(row=0,
+                                   column=1,
+                                   padx=(5, 0),
+                                   pady=0,
+                                   sticky="nsew")
+        self.frame_info_panel.rowconfigure(1, weight=1)
+        self.frame_info_panel.columnconfigure(0, weight=1)
+
+        # Créer les widgets d'informations via InfoPanel
+        self.info_panel.create_info_widgets(self.frame_info_panel)
+
+        # === ZONE SCAN (identique mais référence modifiée) ===
         self.frame_scan = ctk.CTkFrame(self, corner_radius=10)
         self.frame_scan.grid(row=1,
                              column=0,
@@ -130,7 +169,7 @@ class SimpleApp(ctk.CTk):
                                pady=(5, 10),
                                sticky="ew")
 
-        # === ZONE STATUTS DROITE ===
+        # === ZONE STATUTS DROITE (identique) ===
         self.frame_status = ctk.CTkFrame(self.frame_scan,
                                          corner_radius=5,
                                          border_width=1,
@@ -197,10 +236,7 @@ class SimpleApp(ctk.CTk):
 
                 client = mqtt.Client(
                     client_id=f"simple_ui_{os.getpid()}",
-                    callback_api_version=mqtt.
-                    CallbackAPIVersion.  # type: ignore
-                    VERSION1  # type: ignore
-                )
+                    callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
 
                 client.on_connect = self._on_connect
                 client.on_message = self._on_message
@@ -309,6 +345,19 @@ class SimpleApp(ctk.CTk):
         # Scroller vers le bas
         self.messages_textbox.see("end")
 
+        # Déclencher une mise à jour manuelle du panneau d'infos après certaines actions
+        if msg_type in ["success"] and any(
+                keyword in message.lower()
+                for keyword in ["créée", "expédition"]):
+            self.after(2000, self._safe_manual_refresh)
+
+    def _safe_manual_refresh(self):
+        """Effectue une mise à jour manuelle sécurisée du panneau d'infos."""
+        try:
+            self.info_panel.manual_refresh()
+        except Exception as e:
+            log(f"SimpleUI: Erreur refresh manuel: {e}", level="ERROR")
+
     def update_status(self, status_type, message, color):
         """
         Met à jour un label de statut.
@@ -347,6 +396,15 @@ class SimpleApp(ctk.CTk):
                 self.label_response2.configure(text=msg2)
 
         self.after(0, update)
+
+    def destroy(self):
+        """Nettoyage lors de la fermeture de l'application."""
+        try:
+            self.info_panel.stop_updates()
+        except Exception as e:
+            log(f"SimpleUI: Erreur lors du nettoyage: {e}", level="ERROR")
+        finally:
+            super().destroy()
 
 
 def main():
