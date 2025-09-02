@@ -9,16 +9,21 @@ import string
 from src.ui.system_utils import log
 from .printer_config import PrinterConfig
 
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CSV_FILE_PATH = os.path.join(PROJECT_ROOT, "printed_serials.csv")
+SAV_CSV_FILE_PATH = os.path.join(PROJECT_ROOT, "sav_batteries.csv")
+
 
 class CSVSerialManager:
     """
     Classe pour gérer les opérations CSV et la génération de numéros de série.
     """
     # Configuration
-    SERIAL_CSV_FILE = "printed_serials.csv"
     SERIAL_PREFIX = "RW-48v271"
     SERIAL_NUMERIC_LENGTH = 4
-    SAV_CSV_FILE = "sav_batteries.csv"
+    SERIAL_CSV_FILE = CSV_FILE_PATH
+    SAV_CSV_FILE = SAV_CSV_FILE_PATH
 
     @staticmethod
     def generate_random_code(length=6):
