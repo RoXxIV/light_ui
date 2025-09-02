@@ -166,12 +166,95 @@ class MinimalPrinter:
         for attempt in range(3):
             sock = None
             try:
+                # La création du socket est maintenant DANS la boucle
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
                 sock.connect(
                     (PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
-                # Si la connexion réussit, on sort de la boucle pour continuer
-                break
+
+                # Si la connexion réussit, on continue pour envoyer la commande de statut
+                # --- La suite s'exécute uniquement si la connexion a réussi ---
+                command = b'~HQES\r\n'
+                sock.sendall(command)
+
+                # Recevoir réponse
+                response_bytes = b''
+                try:
+                    while True:
+                        chunk = sock.recv(1024)
+                        if not chunk:
+                            break
+                        response_bytes += chunk
+                        if b'\x03' in chunk:  # ETX
+                            break
+                except socket.timeout:
+                    if not response_bytes:
+                        return {
+                            'status': PrinterConfig.STATUS_ERROR_COMM,
+                            'message': 'Timeout communication',
+                            'ready': False
+                        }
+
+                if response_bytes:
+                    response_str = response_bytes.decode('ascii',
+                                                         errors='ignore')
+                    parsed_data = self._parse_hqes_response(response_str)
+
+                    if parsed_data:
+                        error_flag, error_g2_hex, error_g1_hex, _, _, _ = parsed_data
+
+                        if error_flag == '0':
+                            return {
+                                'status': PrinterConfig.STATUS_OK,
+                                'message': 'Imprimante prête',
+                                'ready': True
+                            }
+                        else:
+                            try:
+                                error_g1_int = int(error_g1_hex, 16)
+
+                                if error_g1_int & PrinterConfig.ERROR_MASK_MEDIA_OUT:
+                                    return {
+                                        'status':
+                                        PrinterConfig.STATUS_MEDIA_OUT,
+                                        'message': 'Plus de papier/étiquettes',
+                                        'ready': False
+                                    }
+                                elif error_g1_int & PrinterConfig.ERROR_MASK_HEAD_OPEN:
+                                    return {
+                                        'status':
+                                        PrinterConfig.STATUS_HEAD_OPEN,
+                                        'message':
+                                        'Tête d\'impression ouverte',
+                                        'ready': False
+                                    }
+                                else:
+                                    return {
+                                        'status':
+                                        PrinterConfig.STATUS_ERROR_UNKNOWN,
+                                        'message':
+                                        f'Erreur inconnue (G1: {error_g1_hex})',
+                                        'ready': False
+                                    }
+                            except ValueError:
+                                return {
+                                    'status':
+                                    PrinterConfig.STATUS_ERROR_UNKNOWN,
+                                    'message': 'Erreur parsing statut',
+                                    'ready': False
+                                }
+                    else:
+                        return {
+                            'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
+                            'message': 'Réponse imprimante non comprise',
+                            'ready': False
+                        }
+                else:
+                    return {
+                        'status': PrinterConfig.STATUS_ERROR_COMM,
+                        'message': 'Aucune réponse de l\'imprimante',
+                        'ready': False
+                    }
 
             except socket.error as e:
                 if "Network is unreachable" in str(e) and attempt < 2:
@@ -180,128 +263,27 @@ class MinimalPrinter:
                     time.sleep(5)
                     continue  # Passe à la tentative suivante
                 else:
-                    # Pour toute autre erreur réseau ou après la dernière tentative
                     return {
                         'status': PrinterConfig.STATUS_ERROR_COMM,
                         'message': f'Erreur réseau: {str(e)[:50]}',
                         'ready': False
                     }
-            finally:
-                if sock and attempt < 2:  # Ferme le socket uniquement si on ne continue pas
-                    sock.close()
-
-        # --- Si la connexion échoue après toutes les tentatives, sock sera None ---
-        if not sock:
-            return {
-                'status': PrinterConfig.STATUS_ERROR_COMM,
-                'message': 'Réseau inaccessible après plusieurs tentatives',
-                'ready': False
-            }
-
-        # --- La suite s'exécute uniquement si la connexion a réussi ---
-        try:
-            # Envoyer commande de statut
-            command = b'~HQES\r\n'
-            sock.sendall(command)
-
-            # Recevoir réponse
-            response_bytes = b''
-            try:
-                while True:
-                    chunk = sock.recv(1024)
-                    if not chunk:
-                        break
-                    response_bytes += chunk
-                    if b'\x03' in chunk:  # ETX
-                        break
-            except socket.timeout:
-                if not response_bytes:
-                    return {
-                        'status': PrinterConfig.STATUS_ERROR_COMM,
-                        'message': 'Timeout communication',
-                        'ready': False
-                    }
-
-            if response_bytes:
-                response_str = response_bytes.decode('ascii', errors='ignore')
-                parsed_data = self._parse_hqes_response(response_str)
-
-                if parsed_data:
-                    error_flag, error_g2_hex, error_g1_hex, _, _, _ = parsed_data
-
-                    if error_flag == '0':
-                        return {
-                            'status': PrinterConfig.STATUS_OK,
-                            'message': 'Imprimante prête',
-                            'ready': True
-                        }
-                    else:
-                        try:
-                            error_g1_int = int(error_g1_hex, 16)
-
-                            if error_g1_int & PrinterConfig.ERROR_MASK_MEDIA_OUT:
-                                return {
-                                    'status': PrinterConfig.STATUS_MEDIA_OUT,
-                                    'message': 'Plus de papier/étiquettes',
-                                    'ready': False
-                                }
-                            elif error_g1_int & PrinterConfig.ERROR_MASK_HEAD_OPEN:
-                                return {
-                                    'status': PrinterConfig.STATUS_HEAD_OPEN,
-                                    'message': 'Tête d\'impression ouverte',
-                                    'ready': False
-                                }
-                            else:
-                                return {
-                                    'status':
-                                    PrinterConfig.STATUS_ERROR_UNKNOWN,
-                                    'message':
-                                    f'Erreur inconnue (G1: {error_g1_hex})',
-                                    'ready': False
-                                }
-                        except ValueError:
-                            return {
-                                'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
-                                'message': 'Erreur parsing statut',
-                                'ready': False
-                            }
-                else:
-                    return {
-                        'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
-                        'message': 'Réponse imprimante non comprise',
-                        'ready': False
-                    }
-            else:
+            except Exception as e:
                 return {
-                    'status': PrinterConfig.STATUS_ERROR_COMM,
-                    'message': 'Aucune réponse de l\'imprimante',
+                    'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
+                    'message': f'Erreur inattendue: {str(e)[:50]}',
                     'ready': False
                 }
-
-        except socket.timeout:
-            return {
-                'status': PrinterConfig.STATUS_ERROR_COMM,
-                'message': 'Timeout connexion imprimante',
-                'ready': False
-            }
-        except socket.error as e:
-            return {
-                'status': PrinterConfig.STATUS_ERROR_COMM,
-                'message': f'Erreur réseau: {str(e)[:50]}',
-                'ready': False
-            }
-        except Exception as e:
-            return {
-                'status': PrinterConfig.STATUS_ERROR_UNKNOWN,
-                'message': f'Erreur inattendue: {str(e)[:50]}',
-                'ready': False
-            }
-        finally:
-            if sock:
-                try:
+            finally:
+                if sock:
                     sock.close()
-                except:
-                    pass
+
+        # Si la boucle se termine sans succès
+        return {
+            'status': PrinterConfig.STATUS_ERROR_COMM,
+            'message': 'Réseau inaccessible après plusieurs tentatives',
+            'ready': False
+        }
 
     def _parse_hqes_response(self, response_str):
         """Parse la réponse ~HQES."""
