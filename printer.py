@@ -153,7 +153,7 @@ class MinimalPrinter:
 
     def _check_printer_status(self):
         """
-        Vérifie le statut de l'imprimante pour l'UI.
+        Vérifie le statut de l'imprimante pour l'UI avec une logique de tentatives.
         
         Returns:
             dict: {
@@ -162,14 +162,44 @@ class MinimalPrinter:
                 'ready': True|False
             }
         """
-        sock = None
+        # --- Boucle de tentatives pour la connexion initiale ---
+        for attempt in range(3):
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
+                sock.connect(
+                    (PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
+                # Si la connexion réussit, on sort de la boucle pour continuer
+                break
 
+            except socket.error as e:
+                if "Network is unreachable" in str(e) and attempt < 2:
+                    log(f"MinimalPrinter: Réseau non prêt (tentative {attempt + 1}/3). Nouvel essai dans 5s.",
+                        level="WARNING")
+                    time.sleep(5)
+                    continue  # Passe à la tentative suivante
+                else:
+                    # Pour toute autre erreur réseau ou après la dernière tentative
+                    return {
+                        'status': PrinterConfig.STATUS_ERROR_COMM,
+                        'message': f'Erreur réseau: {str(e)[:50]}',
+                        'ready': False
+                    }
+            finally:
+                if sock and attempt < 2:  # Ferme le socket uniquement si on ne continue pas
+                    sock.close()
+
+        # --- Si la connexion échoue après toutes les tentatives, sock sera None ---
+        if not sock:
+            return {
+                'status': PrinterConfig.STATUS_ERROR_COMM,
+                'message': 'Réseau inaccessible après plusieurs tentatives',
+                'ready': False
+            }
+
+        # --- La suite s'exécute uniquement si la connexion a réussi ---
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
-            sock.connect(
-                (PrinterConfig.PRINTER_IP, PrinterConfig.PRINTER_PORT))
-
             # Envoyer commande de statut
             command = b'~HQES\r\n'
             sock.sendall(command)
