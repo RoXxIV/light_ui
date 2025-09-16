@@ -714,3 +714,73 @@ class CSVSerialManager:
             log(f"Erreur lors de la recherche de {serial_number_to_find} dans CSV pour réimpression: {e}",
                 level="ERROR")
             return None, None, None
+
+    @staticmethod
+    def update_serial_for_downgrade(original_serial, new_serial):
+        """
+        Met à jour le numéro de série dans le CSV pour un downgrade.
+        
+        Args:
+            original_serial (str): Le numéro de série d'origine à trouver.
+            new_serial (str): Le nouveau numéro de série à enregistrer.
+            
+        Returns:
+            bool: True si la mise à jour a réussi, False sinon.
+        """
+        if not os.path.exists(CSVSerialManager.SERIAL_CSV_FILE):
+            log(f"Fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}' non trouvé pour le downgrade.",
+                level="ERROR")
+            return False
+
+        rows_to_write = []
+        updated_in_memory = False
+
+        try:
+            with open(CSVSerialManager.SERIAL_CSV_FILE,
+                      mode='r',
+                      newline='',
+                      encoding='utf-8') as f_read:
+                reader = csv.reader(f_read)
+                header = next(reader, None)
+                if not header:
+                    return False
+                rows_to_write.append(header)
+
+                # Trouver la colonne "NumeroSerie"
+                try:
+                    serial_col_index = header.index("NumeroSerie")
+                except ValueError:
+                    log("Colonne 'NumeroSerie' non trouvée dans le CSV.",
+                        level="ERROR")
+                    return False
+
+                # Lire et modifier la ligne correspondante
+                for row in reader:
+                    if row and len(row) > serial_col_index and row[
+                            serial_col_index] == original_serial:
+                        row[serial_col_index] = new_serial
+                        updated_in_memory = True
+                        log(f"Mise à jour du serial en mémoire: {original_serial} -> {new_serial}",
+                            level="INFO")
+                    rows_to_write.append(row)
+
+            # Réécrire le fichier si une modification a eu lieu
+            if updated_in_memory:
+                with open(CSVSerialManager.SERIAL_CSV_FILE,
+                          mode='w',
+                          newline='',
+                          encoding='utf-8') as f_write:
+                    writer = csv.writer(f_write)
+                    writer.writerows(rows_to_write)
+                log(f"Fichier CSV mis à jour avec le nouveau serial: {new_serial}",
+                    level="INFO")
+                return True
+            else:
+                log(f"Aucun serial correspondant à '{original_serial}' trouvé pour le downgrade.",
+                    level="WARNING")
+                return False
+
+        except Exception as e:
+            log(f"Erreur lors de la mise à jour du serial pour le downgrade: {e}",
+                level="ERROR")
+            return False

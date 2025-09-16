@@ -216,7 +216,8 @@ class SimpleApp(ctk.CTk):
 
         self.info_label = ctk.CTkLabel(
             self.frame_info,
-            text="Commandes: create <nom> | reprint | expedition | sav",
+            text=
+            "Commandes: create <nom> | reprint | expedition | sav | downgrade",
             font=("Helvetica", 12),
             text_color="#808080")
         self.info_label.pack(pady=5)

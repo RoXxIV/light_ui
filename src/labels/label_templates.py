@@ -11,17 +11,20 @@ class LabelTemplates:
     """
 
     @staticmethod
-    def get_main_label_zpl(serial_number, random_code_for_qr):
+    def get_main_label_zpl(serial_number, random_code_for_qr, kwh, ah):
         """
         Template ZPL pour l'étiquette principale avec QR code.
         
         Args:
             serial_number (str): Numéro de série de la batterie
             random_code_for_qr (str): Code aléatoire pour le QR code
+            kwh (int): Capacité en kWh
+            ah (int): Capacité en Ah
             
         Returns:
             str: Commande ZPL formatée
         """
+        modele = f"RW-48V{ah}{kwh}"
         return f"""
    ^XA
     ~TA000
@@ -45,8 +48,8 @@ class LabelTemplates:
     ^PW815
     ^LL408
     ^LS0
-    ^FT28,33^A0N,14,15^FH\\^CI28^FDModèle : RW-48V27113^FS^CI27
-    ^FT28,62^A0N,14,15^FH\\^CI28^FDCapacité : 271 Ah (13 KWh) | Tension nominale : 48 V^FS^CI27
+    ^FT28,33^A0N,14,15^FH\\^CI28^FDModèle : {modele}^FS^CI27
+    ^FT28,62^A0N,14,15^FH\\^CI28^FDCapacité : {ah} Ah ({kwh} KWh) | Tension nominale : 48 V^FS^CI27
     ^FT28,91^A0N,14,15^FH\\^CI28^FDPlage de tension : 41V - 53V^FS^CI27
     ^FT28,120^A0N,14,15^FH\\^CI28^FDLiFePO4 | Poids : 115 kg | 608*460*248mm^FS^CI27
     ^FPH,2^FT401,39^A0N,20,20^FH\\^CI28^FDAVERTISSEMENT^FS^CI27
@@ -80,7 +83,8 @@ class LabelTemplates:
     """
 
     @staticmethod
-    def get_v1_label_zpl(serial_number, random_code_for_qr, fabrication_date_str):
+    def get_v1_label_zpl(serial_number, random_code_for_qr,
+                         fabrication_date_str):
         """
         Template ZPL pour l'étiquette V1 (interieur batterie) avec date de fabrication.
         
@@ -126,7 +130,7 @@ class LabelTemplates:
     """
 
     @staticmethod
-    def get_shipping_label_zpl(serial_number):
+    def get_shipping_label_zpl(serial_number, kwh, ah):
         """
         Template ZPL pour l'étiquette d'expédition (carton).
         
@@ -161,7 +165,7 @@ class LabelTemplates:
 ^LS0
 ^FT40,343^A0N,45,46^FH\\^CI28^FD{serial_number} - {PrinterConfig.SOFTWARE_VERSION}^FS^CI27
 ^FT40,67^A0N,28,28^FH\\^CI28^FDNe pas stocker en exterieur.^FS^CI27
-^FT40,115^A0N,28,28^FH\\^CI28^FD48V 271Ah 13KWh^FS^CI27
+^FT40,115^A0N,28,28^FH\\^CI28^FD48V {ah}Ah {kwh}KWh^FS^CI27
 ^FT40,164^A0N,28,28^FH\\^CI28^FD115 kg | 610*460*250mm^FS^CI27
 ^FO444,39
 ^BQN,2,10

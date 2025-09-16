@@ -27,9 +27,11 @@ class ScanManager:
     STATE_AWAIT_SAV_CONFIRM = 6
     STATE_AWAIT_QR_TEXT = 7
     STATE_AWAIT_QR_CONFIRM = 8
+    STATE_AWAIT_DOWNGRADE_SERIAL = 9
+    STATE_AWAIT_DOWNGRADE_CONFIRM = 10
 
     # === CONSTANTES ===
-    SERIAL_PATTERN = r"RW-48v271[A-Za-z0-9]{4}"
+    SERIAL_PATTERN = r"RW-48v(271|250)[A-Za-z0-9]{4}"
     TIMEOUT_S = 30
 
     def __init__(self, app):
@@ -48,6 +50,7 @@ class ScanManager:
         self.expedition_mode_active = False
         self.serial_for_sav = None
         self.qr_text_to_print = None
+        self.serial_to_downgrade = None
 
         # Timer de timeout
         self.timeout_timer_id = None
@@ -78,18 +81,28 @@ class ScanManager:
 
         # === DISPATCH SELON L'ÉTAT ===
         handlers = {
-            self.STATE_IDLE: self._handle_idle_state,
-            self.STATE_AWAIT_REPRINT_SERIAL: self._handle_await_reprint_serial,
+            self.STATE_IDLE:
+            self._handle_idle_state,
+            self.STATE_AWAIT_REPRINT_SERIAL:
+            self._handle_await_reprint_serial,
             self.STATE_AWAIT_REPRINT_CONFIRM:
             self._handle_await_reprint_confirm,
             self.STATE_AWAIT_EXPEDITION_SERIAL:
             self._handle_await_expedition_serial,
             self.STATE_AWAIT_EXPEDITION_CONFIRM:
             self._handle_await_expedition_confirm,
-            self.STATE_AWAIT_SAV_SERIAL: self._handle_await_sav_serial,
-            self.STATE_AWAIT_SAV_CONFIRM: self._handle_await_sav_confirm,
-            self.STATE_AWAIT_QR_TEXT: self._handle_await_qr_text,
-            self.STATE_AWAIT_QR_CONFIRM: self._handle_await_qr_confirm,
+            self.STATE_AWAIT_SAV_SERIAL:
+            self._handle_await_sav_serial,
+            self.STATE_AWAIT_SAV_CONFIRM:
+            self._handle_await_sav_confirm,
+            self.STATE_AWAIT_QR_TEXT:
+            self._handle_await_qr_text,
+            self.STATE_AWAIT_QR_CONFIRM:
+            self._handle_await_qr_confirm,
+            self.STATE_AWAIT_DOWNGRADE_SERIAL:
+            self._handle_await_downgrade_serial,
+            self.STATE_AWAIT_DOWNGRADE_CONFIRM:
+            self._handle_await_downgrade_confirm,
         }
 
         handler = handlers.get(self.current_state)
@@ -123,8 +136,13 @@ class ScanManager:
         elif text_lower == "sav":
             return self._handle_sav_command()
 
+        # === QR ===
         elif text_lower == "new qr":
             return self._handle_new_qr_command()
+
+        # === DOWNGRADE ===
+        elif text_lower == "downgrade":
+            return self._handle_downgrade_command()
 
         return False
 
@@ -550,6 +568,7 @@ class ScanManager:
         self.serials_for_expedition = []
         self.expedition_mode_active = False
         self.serial_for_sav = None
+        self.serial_to_downgrade = None
 
         self._cancel_timeout()
 
@@ -709,5 +728,67 @@ class ScanManager:
         else:
             self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer le QR")
             self.app.add_message("❌ MQTT déconnecté - QR échoué", "error")
+
+        self._reset_scan()
+
+    def _handle_downgrade_command(self):
+        """Gère la commande downgrade."""
+        if not is_printer_service_running():
+            self._update_ui("❌ Service d'impression inactif",
+                            "Downgrade impossible")
+            self.app.add_message("❌ Service d'impression non détecté", "error")
+            return True
+
+        self._change_state(self.STATE_AWAIT_DOWNGRADE_SERIAL)
+        self._update_ui("📉 Mode Downgrade",
+                        "Scanner le numéro de série à déclasser")
+        self.app.add_message("📉 Mode Downgrade activé", "info")
+        self._start_timeout()
+        return True
+
+    def _handle_await_downgrade_serial(self, text):
+        """Gère l'attente du serial pour le downgrade."""
+        serial = self._extract_serial(text)
+        if not serial:
+            self._update_ui("❌ Série invalide",
+                            "Format attendu: RW-48v271XXXX")
+            self.app.add_message(f"❌ Format de série invalide: {text}",
+                                 "error")
+            self._delayed_reset(2000)
+            return
+
+        self.serial_to_downgrade = serial
+        self._change_state(self.STATE_AWAIT_DOWNGRADE_CONFIRM)
+
+        self._update_ui(f"✅ Série: {serial}",
+                        "Scanner 'downgrade' pour confirmer")
+        self.app.add_message(f"✅ Série sélectionnée: {serial}", "success")
+        self._start_timeout()
+
+    def _handle_await_downgrade_confirm(self, text):
+        """Gère la confirmation de downgrade."""
+        if text.lower().strip() != "downgrade":
+            self._update_ui("❌ Confirmation incorrecte",
+                            "Scanner 'downgrade' pour confirmer")
+            self.app.add_message(f"❌ Attendu 'downgrade', reçu: {text}",
+                                 "error")
+            self._delayed_reset(2000)
+            return
+
+        # Envoyer la demande de downgrade
+        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
+            self.app.mqtt_client.publish("printer/downgrade_battery",
+                                         self.serial_to_downgrade,
+                                         qos=1)
+
+            self._update_ui("📉 Downgrade lancé",
+                            f"Série: {self.serial_to_downgrade}")
+            self.app.add_message(
+                f"📉 Downgrade lancé pour {self.serial_to_downgrade}",
+                "success")
+        else:
+            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer la demande")
+            self.app.add_message("❌ MQTT déconnecté - downgrade échoué",
+                                 "error")
 
         self._reset_scan()

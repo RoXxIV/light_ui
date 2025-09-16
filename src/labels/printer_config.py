@@ -21,6 +21,7 @@ class PrinterConfig:
     MQTT_TOPIC_SAV_ENTRY = "printer/sav_entry"
     MQTT_TOPIC_SAV_DEPARTURE = "printer/sav_departure"
     MQTT_TOPIC_CREATE_QR = "printer/create_qr"
+    MQTT_TOPIC_DOWNGRADE_BATTERY = "printer/downgrade_battery"
     # --- Configuration Imprimante ---
     PRINTER_IP = "192.168.1.123"  # ip de l'imprimante
     PRINTER_PORT = 9100
@@ -45,5 +46,11 @@ class PrinterConfig:
     ERROR_MASK_CUTTER_FAULT = 0x08  # Bit 3
     # --- Configuration CSV et Sériaux ---
     SERIAL_CSV_FILE = "printed_serials.csv"
-    SERIAL_PREFIX = "RW-48v271"
+    DEFAULT_SERIAL_PREFIX = "RW-48v271"
+    DOWNGRADED_SERIAL_PREFIX = "RW-48v250"
     SERIAL_NUMERIC_LENGTH = 4
+    # --- Configuration des capacités ---
+    DEFAULT_KWH = 13
+    DEFAULT_AH = 271
+    DOWNGRADED_KWH = 12
+    DOWNGRADED_AH = 250
