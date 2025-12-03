@@ -130,26 +130,32 @@ class MinimalPrinter:
     def _process_print_item(self, item):
         """
         Traite un élément de la file d'impression.
-        
-        Args:
-            item: Tuple (action_type, serial_number, random_code, fabrication_date)
-            
-        Returns:
-            bool: True si succès, False sinon
         """
-        if not item or len(item) < 6:
+        if not item or len(item) < 7:
             log(f"MinimalPrinter: Item malformé: {item}", level="ERROR")
-            return True  # Retirer de la file
+            return True
 
-        action_type, serial_number, random_code, fabrication_date, kwh, ah = item
+        action_type, serial_number, random_code, fabrication_date, kwh, ah, material_type = item
 
-        if action_type == "PRINT_ALL_THREE":
+        if action_type == "PRINT_V1_INITIAL":
+            return self._print_v1_label(serial_number, fabrication_date)
+
+        elif action_type == "PRINT_ALL_THREE_FINAL":
             return self._print_all_three_labels(serial_number, random_code,
-                                                fabrication_date, kwh, ah)
+                                                fabrication_date, kwh, ah,
+                                                material_type)
+
+        elif action_type == "PRINT_FINAL_TWO":
+            success_main = self._print_main_label(serial_number, random_code,
+                                                  kwh, ah, material_type)
+            success_shipping = self._print_shipping_label(
+                serial_number, kwh, ah)
+            return success_main and success_shipping
+
         else:
             log(f"MinimalPrinter: Type d'action inconnu: {action_type}",
                 level="ERROR")
-            return True  # Retirer de la file
+            return True
 
     def _check_printer_status(self):
         """
@@ -312,17 +318,16 @@ class MinimalPrinter:
             return None
 
     def _print_all_three_labels(self, serial_number, random_code,
-                                fabrication_date, kwh, ah):
+                                fabrication_date, kwh, ah, material_type):
         """
         Imprime les 3 étiquettes pour un serial donné.
         
         Returns:
             bool: True si toutes les impressions réussies
         """
-        success_v1 = self._print_v1_label(serial_number, random_code,
-                                          fabrication_date)
+        success_v1 = self._print_v1_label(serial_number, fabrication_date)
         success_main = self._print_main_label(serial_number, random_code, kwh,
-                                              ah)
+                                              ah, material_type)
         success_shipping = self._print_shipping_label(serial_number, kwh, ah)
 
         if success_v1 and success_main and success_shipping:
@@ -342,13 +347,13 @@ class MinimalPrinter:
             # S'abonner seulement aux 3 topics essentiels
             topics = [
                 PrinterConfig.MQTT_TOPIC_CREATE_LABEL,  # CREATE
-                PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT,  # REPRINT
                 PrinterConfig.
                 MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP,  # EXPEDITION
+                PrinterConfig.MQTT_TOPIC_VALIDATE_BATTERY,
                 PrinterConfig.MQTT_TOPIC_SAV_ENTRY,  # SAV ENTRY
                 PrinterConfig.MQTT_TOPIC_SAV_DEPARTURE,  # SAV DEPARTURE
                 PrinterConfig.MQTT_TOPIC_CREATE_QR,  # QR
-                PrinterConfig.MQTT_TOPIC_DOWNGRADE_BATTERY,
+                PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT,  # REPRINT
             ]
 
             for topic in topics:
@@ -375,8 +380,8 @@ class MinimalPrinter:
             if topic == PrinterConfig.MQTT_TOPIC_CREATE_LABEL:
                 self._handle_create(payload_str)
 
-            elif topic == PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT:
-                self._handle_reprint(payload_str)
+            elif topic == PrinterConfig.MQTT_TOPIC_VALIDATE_BATTERY:
+                self._handle_validate_battery(payload_str)
 
             elif topic == PrinterConfig.MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP:
                 self._handle_expedition(payload_str)
@@ -390,8 +395,8 @@ class MinimalPrinter:
             elif topic == PrinterConfig.MQTT_TOPIC_CREATE_QR:
                 self._handle_create_qr(payload_str)
 
-            elif topic == PrinterConfig.MQTT_TOPIC_DOWNGRADE_BATTERY:
-                self._handle_downgrade(payload_str)
+            elif topic == PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT:
+                self._handle_full_reprint(payload_str)
 
             else:
                 log(f"MinimalPrinter: Topic non géré: {topic}",
@@ -404,123 +409,6 @@ class MinimalPrinter:
     def _on_disconnect(self, client, userdata, rc):
         """Callback de déconnexion MQTT."""
         log(f"MinimalPrinter: Déconnexion MQTT, code: {rc}", level="WARNING")
-
-    def _handle_create(self, payload_str):
-        """
-        CREATE : Créer ligne CSV + ajouter à la file d'impression.
-        Format: {"checker_name": "nom"}
-        """
-        try:
-            data = json.loads(payload_str)
-            checker_name = data.get("checker_name", "").strip()
-
-            if not checker_name:
-                log("MinimalPrinter: CREATE - Nom de checkeur manquant",
-                    level="ERROR")
-                self._publish_operation_result("create", False,
-                                               "Nom de checkeur manquant")
-                return
-
-            # Générer nouveau serial
-            serial_number = CSVSerialManager.generate_next_serial_number()
-            random_code = CSVSerialManager.generate_random_code()
-            timestamp_iso = datetime.now().isoformat()
-            fabrication_date = datetime.now().strftime("%d/%m/%Y")
-
-            # TOUJOURS créer la ligne CSV d'abord
-            if not CSVSerialManager.add_serial_to_csv(
-                    timestamp_iso, serial_number, random_code, checker_name):
-                log(f"MinimalPrinter: CREATE - Échec enregistrement CSV pour {serial_number}",
-                    level="ERROR")
-                self._publish_operation_result("create", False,
-                                               "Erreur sauvegarde CSV")
-                return
-
-            log(f"MinimalPrinter: CREATE - CSV mis à jour pour {serial_number} (checkeur: {checker_name})",
-                level="INFO")
-
-            # Ajouter à la file d'impression (sera traité quand l'imprimante sera prête)
-            with self.queue_lock:
-                self.print_queue.append(
-                    ("PRINT_ALL_THREE", serial_number, random_code,
-                     fabrication_date, PrinterConfig.DEFAULT_KWH,
-                     PrinterConfig.DEFAULT_AH))
-                queue_size = len(self.print_queue)
-
-            log(f"MinimalPrinter: CREATE - {serial_number} ajouté à la file d'impression ({queue_size} en attente)",
-                level="INFO")
-            self._publish_operation_result(
-                "create", True,
-                f"Série créée: {serial_number} (en file d'impression)")
-
-        except json.JSONDecodeError:
-            log("MinimalPrinter: CREATE - Payload JSON invalide",
-                level="ERROR")
-            self._publish_operation_result("create", False,
-                                           "Format JSON invalide")
-        except Exception as e:
-            log(f"MinimalPrinter: CREATE - Erreur: {e}", level="ERROR")
-            self._publish_operation_result("create", False,
-                                           f"Erreur: {str(e)[:50]}")
-
-    def _handle_reprint(self, payload_str):
-        """
-        REPRINT : Ajouter à la file d'impression les 3 étiquettes d'un serial existant.
-        Format: "RW-48v271XXXX" (juste le serial number)
-        """
-        try:
-            serial_number = payload_str.strip()
-
-            if not serial_number:
-                log("MinimalPrinter: REPRINT - Numéro de série manquant",
-                    level="ERROR")
-                self._publish_operation_result("reprint", False,
-                                               "Numéro de série manquant")
-                return
-
-            # Récupérer les détails depuis le CSV
-            found_serial, random_code, timestamp_impression = CSVSerialManager.get_details_for_reprint_from_csv(
-                serial_number)
-
-            if not all([found_serial, random_code, timestamp_impression]):
-                log(f"MinimalPrinter: REPRINT - Serial {serial_number} non trouvé dans CSV",
-                    level="ERROR")
-                self._publish_operation_result(
-                    "reprint", False, f"Serial {serial_number} non trouvé")
-                return
-
-            # Extraire la date de fabrication en toute sécurité
-            fabrication_date = ""
-            try:
-                if timestamp_impression and isinstance(timestamp_impression,
-                                                       str):
-                    dt_impression = datetime.fromisoformat(
-                        timestamp_impression)
-                    fabrication_date = dt_impression.strftime("%d/%m/%Y")
-                else:
-                    raise ValueError("Timestamp is None or not a string")
-            except (ValueError, TypeError) as e:
-                fabrication_date = datetime.now().strftime("%d/%m/%Y")
-                log(f"MinimalPrinter: REPRINT - Timestamp invalide pour {serial_number} ({e}), utilisation date actuelle",
-                    level="WARNING")
-
-            # Ajouter à la file d'impression
-            with self.queue_lock:
-                self.print_queue.append(
-                    ("PRINT_ALL_THREE", serial_number, random_code,
-                     fabrication_date, PrinterConfig.DEFAULT_KWH,
-                     PrinterConfig.DEFAULT_AH))
-                queue_size = len(self.print_queue)
-
-            log(f"MinimalPrinter: REPRINT - {serial_number} ajouté à la file d'impression ({queue_size} en attente)",
-                level="INFO")
-            self._publish_operation_result(
-                "reprint", True, f"Réimpression programmée: {serial_number}")
-
-        except Exception as e:
-            log(f"MinimalPrinter: REPRINT - Erreur: {e}", level="ERROR")
-            self._publish_operation_result("reprint", False,
-                                           f"Erreur: {str(e)[:50]}")
 
     def _handle_expedition(self, payload_str):
         """
@@ -565,17 +453,19 @@ class MinimalPrinter:
             self._publish_operation_result("expedition", False,
                                            f"Erreur: {str(e)[:50]}")
 
-    def _print_v1_label(self, serial_number, random_code, fabrication_date):
+    def _print_v1_label(self, serial_number, fabrication_date):
         """Imprime une étiquette V1."""
-        zpl_command = LabelTemplates.get_v1_label_zpl(serial_number,
-                                                      random_code,
-                                                      fabrication_date)
+        zpl_command = LabelTemplates.get_v1_label_zpl(
+            serial_number,
+            fabrication_date,
+        )
         return self._send_zpl_to_printer(zpl_command, f"V1 {serial_number}")
 
-    def _print_main_label(self, serial_number, random_code, kwh, ah):
+    def _print_main_label(self, serial_number, random_code, kwh, ah,
+                          material_type):
         """Imprime une étiquette principale."""
         zpl_command = LabelTemplates.get_main_label_zpl(
-            serial_number, random_code, kwh, ah)
+            serial_number, random_code, kwh, ah, material_type)
         return self._send_zpl_to_printer(zpl_command, f"Main {serial_number}")
 
     def _print_shipping_label(self, serial_number, kwh, ah):
@@ -587,6 +477,8 @@ class MinimalPrinter:
 
     def _send_zpl_to_printer(self, zpl_command, description=""):
         """Envoie une commande ZPL à l'imprimante."""
+        log(f"--- ZPL À IMPRIMER --- Description: {description}\n{zpl_command.strip()}\n----------------------",
+            level="DEBUG")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(PrinterConfig.SOCKET_TIMEOUT_S)
@@ -708,6 +600,39 @@ class MinimalPrinter:
             self._publish_operation_result("sav_entry", False,
                                            f"Erreur: {str(e)[:50]}")
 
+    def _handle_create_qr(self, payload_str):
+        """Gère la création de QR personnalisé avec texte et contenu distincts."""
+        try:
+            data = json.loads(payload_str)
+            display_text = data.get("display_text", "").strip()
+            qr_content = data.get("qr_content", "").strip()
+
+            if not all([display_text, qr_content]):
+                log("MinimalPrinter: CREATE_QR - Données manquantes (display_text ou qr_content)",
+                    level="ERROR")
+                return
+
+            # Utiliser le nouveau template
+            zpl_command = LabelTemplates.get_custom_qr_label_zpl(
+                display_text, qr_content)
+
+            # Envoyer à l'imprimante
+            success = self._send_zpl_to_printer(
+                zpl_command, f"QR Personnalisé: {display_text}")
+
+            if success:
+                log(f"MinimalPrinter: QR personnalisé imprimé avec succès: {display_text}",
+                    level="INFO")
+            else:
+                log(f"MinimalPrinter: Échec impression QR personnalisé: {display_text}",
+                    level="ERROR")
+
+        except json.JSONDecodeError:
+            log("MinimalPrinter: CREATE_QR - Payload JSON invalide",
+                level="ERROR")
+        except Exception as e:
+            log(f"MinimalPrinter: CREATE_QR - Erreur: {e}", level="ERROR")
+
     def _handle_sav_departure(self, payload_str):
         """
         SAV DEPARTURE : Enregistrer la sortie d'une batterie du SAV (lors de l'expédition).
@@ -778,143 +703,203 @@ class MinimalPrinter:
             log(f"MinimalPrinter: Erreur publication résultat: {e}",
                 level="ERROR")
 
-    def _handle_create_qr(self, payload_str):
-        """Gère la création de QR personnalisé."""
+    def _handle_create(self, payload_str):
+        """
+        CREATE INITIAL : Crée une ligne CSV avec un sérial temporaire et imprime l'étiquette V1.
+        Format: {"material_letter": "A"}
+        """
         try:
             data = json.loads(payload_str)
-            qr_text = data.get("qr_text", "").strip()
+            material_letter = data.get("material_letter")
 
-            if not qr_text:
-                log("MinimalPrinter: CREATE_QR - Texte QR manquant",
+            if not material_letter:
+                log("MinimalPrinter: CREATE - Lettre matériau manquante",
                     level="ERROR")
+                self._publish_operation_result("create", False,
+                                               "Données manquantes")
                 return
 
-            # Envoyer le ZPL à l'imprimante
-            success = self._send_qr_zpl_to_printer(qr_text)
+            # 1. Générer la partie numérique unique
+            numeric_part = CSVSerialManager.generate_next_numeric_part()
 
-            if success:
-                log(f"MinimalPrinter: QR imprimé avec succès: {qr_text}",
-                    level="INFO")
-            else:
-                log(f"MinimalPrinter: Échec impression QR: {qr_text}",
+            # 2. Créer l'identifiant pour l'étiquette V1 et son QR code
+            temp_serial_for_v1 = f"{material_letter.upper()}{numeric_part}"
+
+            # 3. Générer un code aléatoire pour les futures étiquettes finales
+            random_qr_code = CSVSerialManager.generate_random_code()
+
+            # 4. Ajouter l'entrée initiale au CSV
+            timestamp_iso = datetime.now().isoformat()
+            if not CSVSerialManager.add_initial_serial_to_csv(
+                    timestamp_iso, numeric_part, material_letter,
+                    random_qr_code):
+                log(f"MinimalPrinter: CREATE - Échec enregistrement CSV pour {numeric_part}",
                     level="ERROR")
-
-        except json.JSONDecodeError:
-            log("MinimalPrinter: CREATE_QR - Payload JSON invalide",
-                level="ERROR")
-        except Exception as e:
-            log(f"MinimalPrinter: CREATE_QR - Erreur: {e}", level="ERROR")
-
-    def _send_qr_zpl_to_printer(self, qr_text):
-        """Envoie ZPL pour QR personnalisé."""
-        zpl_command = f"""
-    ^XA
-    ~TA000
-    ~JSN
-    ^LT0
-    ^MNW
-    ^MTT
-    ^PON
-    ^PMN
-    ^LH0,0
-    ^JMA
-    ^PR4,4
-    ~SD15
-    ^JUS
-    ^LRN
-    ^CI27
-    ^PA0,1,1,0
-    ^XZ
-    ^XA
-    ^MMT
-    ^PW815
-    ^LL200
-    ^LS0
-    ^FT50,50^A0N,30,30^FH\\^CI28^FDQR CODE:^FS^CI27
-    ^FT50,90^A0N,40,40^FH\\^CI28^FD{qr_text}^FS^CI27
-    ^FO500,20
-    ^BQN,2,8
-    ^FH\\^FDLA,{qr_text}^FS
-    ^PQ1,0,1,Y
-    ^XZ
-    """
-        return self._send_zpl_to_printer(zpl_command, f"QR {qr_text}")
-
-    def _handle_downgrade(self, payload_str):
-        """
-        DOWNGRADE : Modifie le CSV avec le nouveau serial (250) et réimprime les étiquettes.
-        """
-        try:
-            original_serial = payload_str.strip()
-            if not original_serial:
-                log("MinimalPrinter: DOWNGRADE - Numéro de série manquant",
-                    level="ERROR")
-                self._publish_operation_result("downgrade", False,
-                                               "Numéro de série manquant")
+                self._publish_operation_result("create", False,
+                                               "Erreur sauvegarde CSV")
                 return
 
-            # Transformer le numéro de série
-            new_serial_number = original_serial.replace(
-                str(PrinterConfig.DEFAULT_AH),
-                str(PrinterConfig.DOWNGRADED_AH))
-            log(f"MinimalPrinter: DOWNGRADE - Transformation: {original_serial} -> {new_serial_number}",
-                level="INFO")
+            # 5. Ajouter SEULEMENT l'étiquette V1 à la file d'impression
+            fabrication_date = datetime.now().strftime("%d/%m/%Y")
 
-            # Mettre à jour le fichier CSV avec le nouveau numéro de série
-            csv_success = CSVSerialManager.update_serial_for_downgrade(
-                original_serial, new_serial_number)
-            if not csv_success:
-                log(f"MinimalPrinter: DOWNGRADE - Échec de la mise à jour du CSV pour {original_serial}",
-                    level="ERROR")
-                self._publish_operation_result("downgrade", False,
-                                               "Erreur CSV")
-                return
-
-            # Récupérer les autres détails en utilisant le NOUVEAU sérial
-            found_serial, random_code, timestamp_impression = CSVSerialManager.get_details_for_reprint_from_csv(
-                new_serial_number)
-
-            if not all([found_serial, random_code, timestamp_impression]):
-                log(f"MinimalPrinter: DOWNGRADE - Serial {new_serial_number} non trouvé après mise à jour CSV",
-                    level="ERROR")
-                self._publish_operation_result(
-                    "downgrade", False,
-                    f"Serial {new_serial_number} non trouvé")
-                return
-
-            # Extraire la date de fabrication en toute sécurité
-            fabrication_date = ""
-            try:
-                if timestamp_impression and isinstance(timestamp_impression,
-                                                       str):
-                    dt_impression = datetime.fromisoformat(
-                        timestamp_impression)
-                    fabrication_date = dt_impression.strftime("%d/%m/%Y")
-                else:
-                    raise ValueError("Timestamp is None or not a string")
-            except (ValueError, TypeError) as e:
-                fabrication_date = datetime.now().strftime("%d/%m/%Y")
-                log(f"MinimalPrinter: DOWNGRADE - Timestamp invalide pour {original_serial} ({e}), utilisation date actuelle",
-                    level="WARNING")
-
-            # Ajouter à la file avec le NOUVEAU sérial et les valeurs DÉCLASSÉES
             with self.queue_lock:
+                # CORRECTION: Le tuple doit avoir 7 éléments pour correspondre à _process_print_item
                 self.print_queue.append(
-                    ("PRINT_ALL_THREE", new_serial_number, random_code,
-                     fabrication_date, PrinterConfig.DOWNGRADED_KWH,
-                     PrinterConfig.DOWNGRADED_AH))
+                    ("PRINT_V1_INITIAL", temp_serial_for_v1,
+                     temp_serial_for_v1, fabrication_date, None, None, None))
                 queue_size = len(self.print_queue)
 
-            log(f"MinimalPrinter: DOWNGRADE - {new_serial_number} ajouté à la file d'impression ({queue_size} en attente)",
+            log(f"MinimalPrinter: CREATE - {temp_serial_for_v1} ajouté à la file pour impression V1 ({queue_size} en attente)",
                 level="INFO")
             self._publish_operation_result(
-                "downgrade", True,
-                f"Réimpression déclassée pour {new_serial_number}")
+                "create", True,
+                f"Étiquette interne créée: {temp_serial_for_v1}")
+
+        except json.JSONDecodeError:
+            log("MinimalPrinter: CREATE - Payload JSON invalide",
+                level="ERROR")
+            self._publish_operation_result("create", False,
+                                           "Format JSON invalide")
+        except Exception as e:
+            log(f"MinimalPrinter: CREATE - Erreur: {e}", level="ERROR")
+            self._publish_operation_result("create", False,
+                                           f"Erreur: {str(e)[:50]}")
+
+    def _handle_validate_battery(self, payload_str):
+        """
+        VALDIATE : Met à jour le sérial dans le CSV et imprime les étiquettes finales.
+        """
+        try:
+            data = json.loads(payload_str)
+            temp_serial = data.get("temp_serial")
+            final_model_key = data.get("final_model_key")
+
+            if not all([temp_serial, final_model_key]):
+                log("MinimalPrinter: VALIDATE - Données manquantes",
+                    level="ERROR")
+                return
+
+            details = CSVSerialManager.validate_and_update_serial(
+                temp_serial, final_model_key)
+            (new_serial, random_qr, ts_impression, model_changed, kwh, ah,
+             material_type) = details
+
+            if not new_serial:
+                log(f"MinimalPrinter: VALIDATE - Échec de la validation pour {temp_serial}",
+                    level="ERROR")
+                self._publish_operation_result(
+                    "validate", False,
+                    f"Validation échouée pour {temp_serial}")
+                return
+
+            # CORRECTION : Vérifier si ts_impression est valide
+            fabrication_date = ""
+            if isinstance(ts_impression, str) and ts_impression:
+                fabrication_date = datetime.fromisoformat(
+                    ts_impression).strftime("%d/%m/%Y")
+            else:
+                # Solution de secours si le timestamp est manquant
+                fabrication_date = datetime.now().strftime("%d/%m/%Y")
+                log(f"MinimalPrinter: VALIDATE - Timestamp d'impression manquant pour {new_serial}, utilisation de la date actuelle.",
+                    level="WARNING")
+
+            with self.queue_lock:
+                if model_changed:
+                    self.print_queue.append(
+                        ("PRINT_ALL_THREE_FINAL", new_serial, random_qr,
+                         fabrication_date, kwh, ah, material_type))
+                    log(f"MinimalPrinter: VALIDATE - Downgrade détecté pour {new_serial}. 3 étiquettes en file.",
+                        level="INFO")
+                else:
+                    self.print_queue.append(
+                        ("PRINT_FINAL_TWO", new_serial, random_qr,
+                         fabrication_date, kwh, ah, material_type))
+                    log(f"MinimalPrinter: VALIDATE - {new_serial} validé. 2 étiquettes finales en file.",
+                        level="INFO")
+
+            self._publish_operation_result(
+                "validate", True, f"Validation réussie: {new_serial}")
 
         except Exception as e:
-            log(f"MinimalPrinter: DOWNGRADE - Erreur: {e}", level="ERROR")
-            self._publish_operation_result("downgrade", False,
-                                           f"Erreur: {str(e)[:50]}")
+            log(f"MinimalPrinter: VALIDATE - Erreur: {e}", level="ERROR")
+            self._publish_operation_result(
+                "validate", False, f"Erreur validation: {str(e)[:50]}")
+
+    def _handle_full_reprint(self, payload_str):
+        """
+        Gère la demande de réimpression intelligente.
+        """
+        try:
+            data = json.loads(payload_str)
+            # On récupère ce que le scan manager a envoyé
+            input_serial = data.get("serial_to_reprint")
+
+            if not input_serial:
+                log("MinimalPrinter: REPRINT - Payload vide", level="ERROR")
+                return
+
+            # 1. Recherche intelligente via le CSV Manager (méthode que vous avez ajoutée)
+            details = CSVSerialManager.search_battery_for_reprint(input_serial)
+
+            if not details:
+                log(f"MinimalPrinter: REPRINT - Impossible de trouver la batterie: {input_serial}",
+                    level="WARNING")
+                return
+
+            # 2. Extraction des données
+            full_serial = details["full_serial"]  # Ex: RW-48v2710341
+            short_serial = details["short_serial"]  # Ex: B0341
+            is_test_done = details["is_test_done"]
+            random_qr = details["random_code"]
+            ts_impression = details["timestamp_impression"]
+
+            # Gestion date fabrication
+            fabrication_date = datetime.now().strftime("%d/%m/%Y")
+            if ts_impression:
+                try:
+                    fabrication_date = datetime.fromisoformat(
+                        ts_impression).strftime("%d/%m/%Y")
+                except ValueError:
+                    pass
+
+            log_msg = f"Reprint V1 ({short_serial})"
+
+            with self.queue_lock:
+                # A. TOUJOURS : Étiquette V1 (avec le Short Serial)
+                self.print_queue.append(
+                    ("PRINT_V1_INITIAL", short_serial, short_serial,
+                     fabrication_date, None, None, None))
+
+                # B. SI TEST TERMINÉ : Étiquettes Main et Shipping (avec Full Serial)
+                if is_test_done:
+                    kwh = 0
+                    ah = 0
+
+                    # Détection du modèle depuis le sérial complet
+                    if "271" in full_serial:
+                        kwh = 13.0
+                        ah = 271
+                    elif "250" in full_serial:
+                        kwh = 12.0
+                        ah = 250
+                    elif "179" in full_serial:
+                        kwh = 8.6
+                        ah = 179
+
+                    if kwh > 0:
+                        # Ajout Main + Shipping à la file
+                        self.print_queue.append(
+                            ("PRINT_FINAL_TWO", full_serial, random_qr,
+                             fabrication_date, kwh, ah, details["type"]))
+                        log_msg += " + Main + Shipping"
+                    else:
+                        log(f"MinimalPrinter: REPRINT - kWh inconnu pour {full_serial}, V1 seule.",
+                            level="WARNING")
+
+            log(f"MinimalPrinter: REPRINT SUCCÈS - {log_msg}", level="INFO")
+
+        except Exception as e:
+            log(f"MinimalPrinter: REPRINT - Erreur: {e}", level="ERROR")
 
 
 def main():

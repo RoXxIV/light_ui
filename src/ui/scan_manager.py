@@ -10,6 +10,8 @@ import time
 import threading
 from datetime import datetime
 from src.ui.system_utils import log, is_printer_service_running
+# Importe la configuration des modèles
+from src.labels.printer_config import PrinterConfig
 
 
 class ScanManager:
@@ -19,20 +21,23 @@ class ScanManager:
 
     # === ÉTATS ===
     STATE_IDLE = 0
-    STATE_AWAIT_REPRINT_SERIAL = 1
-    STATE_AWAIT_REPRINT_CONFIRM = 2
+    # États pour le nouveau processus de création
+    STATE_AWAIT_FINISH_SERIAL = 1
+    STATE_AWAIT_FINISH_CONFIRM = 2
     STATE_AWAIT_EXPEDITION_SERIAL = 3
     STATE_AWAIT_EXPEDITION_CONFIRM = 4
     STATE_AWAIT_SAV_SERIAL = 5
     STATE_AWAIT_SAV_CONFIRM = 6
     STATE_AWAIT_QR_TEXT = 7
-    STATE_AWAIT_QR_CONFIRM = 8
-    STATE_AWAIT_DOWNGRADE_SERIAL = 9
-    STATE_AWAIT_DOWNGRADE_CONFIRM = 10
+    STATE_AWAIT_QR_CONTENT = 8
+    STATE_AWAIT_QR_CONFIRM = 9
+    STATE_AWAIT_REPRINT_SERIAL = 10
+    STATE_AWAIT_REPRINT_CONFIRM = 11
 
     # === CONSTANTES ===
-    SERIAL_PATTERN = r"RW-48v(271|250)[A-Za-z0-9]{4}"
+    SERIAL_PATTERN = r"RW-48v(XXX|271|250|179)\d{4}"
     TIMEOUT_S = 30
+    VALID_MATERIAL_LETTERS = ['A', 'B', 'C', 'D', 'E']
 
     def __init__(self, app):
         """
@@ -45,13 +50,15 @@ class ScanManager:
         self.current_state = self.STATE_IDLE
 
         # Données temporaires
-        self.serial_to_reprint = None
         self.serials_for_expedition = []
         self.expedition_mode_active = False
         self.serial_for_sav = None
         self.qr_text_to_print = None
-        self.serial_to_downgrade = None
-
+        self.qr_content_to_encode = None
+        # Données temporaires pour la finalisation
+        self.validated_model = None
+        self.temp_serial_to_validate = None
+        self.serial_to_reprint = None
         # Timer de timeout
         self.timeout_timer_id = None
 
@@ -64,50 +71,44 @@ class ScanManager:
         Args:
             scanned_text (str): Texte scanné/saisi
         """
-        text = scanned_text.strip().lower()
+        text = scanned_text.strip()
+        text_lower = text.lower()
 
         log(f"ScanManager: Traitement '{text}' dans état {self.current_state}",
             level="INFO")
 
         # === COMMANDES GLOBALES ===
         if self.current_state == self.STATE_IDLE:
-            if self._handle_global_commands(text, scanned_text):
+            if self._handle_global_commands(text_lower, text):
                 return
 
         # === COMMANDE CANCEL (en mode expédition) ===
-        if text == "cancel" and self.expedition_mode_active:
+        if text_lower == "cancel" and self.expedition_mode_active:
             self._handle_expedition_cancel()
             return
 
         # === DISPATCH SELON L'ÉTAT ===
         handlers = {
-            self.STATE_IDLE:
-            self._handle_idle_state,
-            self.STATE_AWAIT_REPRINT_SERIAL:
-            self._handle_await_reprint_serial,
-            self.STATE_AWAIT_REPRINT_CONFIRM:
-            self._handle_await_reprint_confirm,
+            self.STATE_IDLE: self._handle_idle_state,
+            self.STATE_AWAIT_FINISH_SERIAL: self._handle_await_finish_serial,
+            self.STATE_AWAIT_FINISH_CONFIRM: self._handle_await_finish_confirm,
             self.STATE_AWAIT_EXPEDITION_SERIAL:
             self._handle_await_expedition_serial,
             self.STATE_AWAIT_EXPEDITION_CONFIRM:
             self._handle_await_expedition_confirm,
-            self.STATE_AWAIT_SAV_SERIAL:
-            self._handle_await_sav_serial,
-            self.STATE_AWAIT_SAV_CONFIRM:
-            self._handle_await_sav_confirm,
-            self.STATE_AWAIT_QR_TEXT:
-            self._handle_await_qr_text,
-            self.STATE_AWAIT_QR_CONFIRM:
-            self._handle_await_qr_confirm,
-            self.STATE_AWAIT_DOWNGRADE_SERIAL:
-            self._handle_await_downgrade_serial,
-            self.STATE_AWAIT_DOWNGRADE_CONFIRM:
-            self._handle_await_downgrade_confirm,
+            self.STATE_AWAIT_SAV_SERIAL: self._handle_await_sav_serial,
+            self.STATE_AWAIT_SAV_CONFIRM: self._handle_await_sav_confirm,
+            self.STATE_AWAIT_QR_TEXT: self._handle_await_qr_text,
+            self.STATE_AWAIT_QR_CONTENT: self._handle_await_qr_content,
+            self.STATE_AWAIT_QR_CONFIRM: self._handle_await_qr_confirm,
+            self.STATE_AWAIT_REPRINT_SERIAL: self._handle_await_reprint_serial,
+            self.STATE_AWAIT_REPRINT_CONFIRM:
+            self._handle_await_reprint_confirm,
         }
 
         handler = handlers.get(self.current_state)
         if handler:
-            handler(scanned_text)
+            handler(text)
         else:
             log(f"ScanManager: État inconnu {self.current_state}",
                 level="ERROR")
@@ -120,13 +121,13 @@ class ScanManager:
         Returns:
             bool: True si une commande a été traitée
         """
-        # === CREATE ===
+        # === NOUVEAU: CREATE DYNAMIQUE ===
         if text_lower.startswith("create "):
             return self._handle_create_command(original_text)
 
-        # === REPRINT ===
-        elif text_lower == "reprint":
-            return self._handle_reprint_command()
+        # === FINISH / VALIDATE ===
+        elif text_lower.startswith("finish "):
+            return self._handle_finish_command(original_text)
 
         # === EXPEDITION ===
         elif text_lower == "expedition":
@@ -140,14 +141,149 @@ class ScanManager:
         elif text_lower == "new qr":
             return self._handle_new_qr_command()
 
-        # === DOWNGRADE ===
-        elif text_lower == "downgrade":
-            return self._handle_downgrade_command()
+        # === REPRINT ===
+        elif text_lower == "reprint":
+            return self._handle_reprint_command()
 
         return False
 
+    def _handle_finish_command(self, text):
+        """Gère la commande initiale 'finish <kWh>'."""
+        try:
+            model_key = text.split(" ", 1)[1].strip()
+            if model_key not in PrinterConfig.BATTERY_MODELS:
+                raise ValueError(f"Modèle '{model_key}' inconnu.")
+
+            self.validated_model = model_key
+            self._change_state(self.STATE_AWAIT_FINISH_SERIAL)
+            self._update_ui(
+                f"Modèle final: {self.validated_model} kWh",
+                "Scannez le QR code intérieur de la batterie (ex: B0210)")
+            self.app.add_message(
+                f"Prêt à finaliser en {self.validated_model} kWh.", "info")
+            self._start_timeout()
+
+        except (IndexError, ValueError) as e:
+            valid_models = ", ".join(PrinterConfig.BATTERY_MODELS.keys())
+            self._update_ui("❌ Commande invalide",
+                            f"Utilisez: finish [{valid_models}]")
+            self.app.add_message(f"Erreur: {e}", "error")
+            self._reset_scan()
+        return True
+
+    def _handle_await_finish_serial(self, text):
+        """Gère l'attente du scan du QR code intérieur."""
+        # Le QR code est de la forme <LETTRE><NUMERIC_PART>
+        temp_serial = text.strip().upper()
+
+        # Validation simple du format
+        if not (len(temp_serial) == 5 and temp_serial[0]
+                in self.VALID_MATERIAL_LETTERS and temp_serial[1:].isdigit()):
+            self._update_ui(
+                "❌ QR code invalide",
+                "Format attendu : une lettre suivie de 4 chiffres (ex: B0210)."
+            )
+            self.app.add_message(f"Format de QR code invalide : {temp_serial}",
+                                 "error")
+            return
+
+        self.temp_serial_to_validate = temp_serial
+        self._change_state(self.STATE_AWAIT_FINISH_CONFIRM)
+        self._update_ui(
+            f"Batterie '{temp_serial}' identifiée",
+            f"Re-scannez 'finish {self.validated_model}' pour valider et imprimer."
+        )
+        self._start_timeout()
+
+    def _is_finish_combination_valid(self, material_letter, model_key):
+        """
+        Vérifie si le modèle de finition est compatible avec le type de matériau.
+        
+        Args:
+            material_letter (str): La lettre du matériau (A, B, C, D, E).
+            model_key (str): La clé du modèle de finition (ex: "13", "12", "8.6").
+            
+        Returns:
+            bool: True si la combinaison est valide, False sinon.
+            str: Un message d'erreur explicite en cas d'échec.
+        """
+        # Règles de compatibilité
+        valid_combinations = {
+            'A': ['13', '12'],
+            'B': ['13', '12'],
+            'C': ['13', '12'],
+            'D': ['8.6'],
+            'E': ['8.6']
+        }
+
+        allowed_models = valid_combinations.get(material_letter)
+
+        if not allowed_models:
+            return False, f"Le type de matériau '{material_letter}' est inconnu."
+
+        if model_key not in allowed_models:
+            error_message = f"Type '{material_letter}' incompatible avec {model_key}kWh. Modèles autorisés: {', '.join(allowed_models)}kWh."
+            return False, error_message
+
+        return True, "Combinaison valide."
+
+    def _handle_await_finish_confirm(self, text):
+        """Gère la confirmation finale et envoie la demande de validation."""
+        expected_command = f"finish {self.validated_model}"
+
+        if text.lower().strip() != expected_command:
+            self._update_ui("❌ Confirmation incorrecte",
+                            f"Attendu: '{expected_command}'")
+            self.app.add_message(f"Confirmation échouée. Reçu: '{text}'",
+                                 "error")
+            self._delayed_reset(2000)
+            return
+
+        if not self.temp_serial_to_validate:
+            log("ScanManager: tentive de validation sans QR code temporaire.",
+                level="ERROR")
+            self._update_ui("❌ Erreur interne",
+                            "Aucun QR code en mémoire. Veuillez recommencer.")
+            self._reset_scan()
+            return
+
+        material_letter = self.temp_serial_to_validate[0]
+        is_valid, error_message = self._is_finish_combination_valid(
+            material_letter, self.validated_model)
+
+        if not is_valid:
+            self._update_ui("❌ Validation échouée", error_message)
+            self.app.add_message(f"Erreur de validation: {error_message}",
+                                 "error")
+            self._reset_scan()
+            return
+        # --- FIN DES VÉRIFICATIONS ---
+
+        # Envoi MQTT au service d'impression
+        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
+            payload = json.dumps({
+                "temp_serial": self.temp_serial_to_validate,
+                "final_model_key": self.validated_model
+            })
+            # Nous utiliserons un nouveau topic pour cette action
+            self.app.mqtt_client.publish("printer/validate_battery",
+                                         payload,
+                                         qos=1)
+
+            self._update_ui(
+                "✅ Validation en cours...",
+                f"Finalisation de '{self.temp_serial_to_validate}' en {self.validated_model} kWh."
+            )
+            self.app.add_message("Demande de validation envoyée.", "success")
+        else:
+            self._update_ui("❌ Erreur MQTT", "Client déconnecté")
+            self.app.add_message("❌ Impossible d'envoyer - MQTT déconnecté",
+                                 "error")
+
+        self._reset_scan()
+
     def _handle_create_command(self, text):
-        """Gère la commande create <nom>."""
+        """Gère la nouvelle commande create <lettre>."""
         if not is_printer_service_running():
             self._update_ui("❌ Service d'impression inactif",
                             "Impossible de créer une étiquette")
@@ -155,46 +291,48 @@ class ScanManager:
             return True
 
         try:
-            checker_name = text.split(" ", 1)[1].strip()
-            if not checker_name:
-                raise ValueError("Nom vide")
-        except (IndexError, ValueError):
-            self._update_ui("❌ Format incorrect", "Utilisez: create <nom>")
-            self.app.add_message("❌ Format incorrect. Utilisez: create <nom>",
-                                 "error")
-            return True
+            letter = text.split(" ", 1)[1].strip().upper()
+            if letter not in self.VALID_MATERIAL_LETTERS:
+                raise ValueError(f"Lettre matériau '{letter}' invalide.")
 
-        # Envoi MQTT
-        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
-            payload = json.dumps({"checker_name": checker_name})
-            self.app.mqtt_client.publish("printer/create_label",
-                                         payload,
-                                         qos=1)
+            # Dictionnaire de correspondance pour les messages
+            material_descriptions = {
+                'A': "28.8Kwh Alu",
+                'B': "14.4 Kwh Alu",
+                'C': "14.4 Kwh Acier",
+                'D': "9.6 Kwh Alu",
+                'E': "9.6 Kwh Acier"
+            }
+            description = material_descriptions.get(
+                letter, f"Matériau {letter}"
+            )  # Fallback si la lettre n'est pas dans le dico
 
-            self._update_ui(f"✅ Étiquette demandée",
-                            f"Validée par {checker_name.title()}")
-            self.app.add_message(
-                f"✅ Étiquette créée pour {checker_name.title()}", "success")
-        else:
-            self._update_ui("❌ Erreur MQTT", "Client déconnecté")
-            self.app.add_message("❌ Impossible d'envoyer - MQTT déconnecté",
-                                 "error")
+            # Envoi MQTT
+            if self.app.mqtt_client and self.app.mqtt_client.is_connected():
+                payload = json.dumps({"material_letter": letter})
+                self.app.mqtt_client.publish("printer/create_label",
+                                             payload,
+                                             qos=1)
 
-        return True
+                # Mise à jour des messages avec la nouvelle description
+                self._update_ui("✅ Création en cours...",
+                                f"Type: {description}")
+                self.app.add_message(
+                    f"Demande de création à partir d'une {description} envoyée.",
+                    "success")
+            else:
+                self._update_ui("❌ Erreur MQTT", "Client déconnecté")
+                self.app.add_message(
+                    "❌ Impossible d'envoyer - MQTT déconnecté", "error")
 
-    def _handle_reprint_command(self):
-        """Gère la commande reprint."""
-        if not is_printer_service_running():
-            self._update_ui("❌ Service d'impression inactif",
-                            "Réimpression impossible")
-            self.app.add_message("❌ Service d'impression non détecté", "error")
-            return True
+        except (IndexError, ValueError) as e:
+            valid_letters = ", ".join(self.VALID_MATERIAL_LETTERS)
+            self._update_ui("❌ Commande invalide",
+                            f"Utilisez: create [{valid_letters}]")
+            self.app.add_message(f"Erreur: {e}", "error")
 
-        self._change_state(self.STATE_AWAIT_REPRINT_SERIAL)
-        self._update_ui("🔄 Mode Réimpression",
-                        "Scanner le numéro de série à réimprimer")
-        self.app.add_message("🔄 Mode réimpression activé", "info")
-        self._start_timeout()
+        # La création est une action unique, on retourne à l'état IDLE
+        # self._reset_scan()
         return True
 
     def _handle_expedition_command(self):
@@ -255,52 +393,6 @@ class ScanManager:
             self._update_ui("❓ Commande inconnue",
                             "Voir la liste des commandes en bas")
             self.app.add_message(f"❓ Commande non reconnue: {text}", "warning")
-
-    def _handle_await_reprint_serial(self, text):
-        """Gère l'attente du serial pour réimpression."""
-        serial = self._extract_serial(text)
-        if not serial:
-            self._update_ui("❌ Série invalide",
-                            "Format attendu: RW-48v271XXXX")
-            self.app.add_message(f"❌ Format de série invalide: {text}",
-                                 "error")
-            self._delayed_reset(2000)
-            return
-
-        self.serial_to_reprint = serial
-        self._change_state(self.STATE_AWAIT_REPRINT_CONFIRM)
-
-        self._update_ui(f"✅ Série: {serial}",
-                        "Scanner 'reprint' pour confirmer")
-        self.app.add_message(f"✅ Série sélectionnée: {serial}", "success")
-        self._start_timeout()
-
-    def _handle_await_reprint_confirm(self, text):
-        """Gère la confirmation de réimpression."""
-        if text.lower().strip() != "reprint":
-            self._update_ui("❌ Confirmation incorrecte",
-                            "Scanner 'reprint' pour confirmer")
-            self.app.add_message(f"❌ Attendu 'reprint', reçu: {text}", "error")
-            self._delayed_reset(2000)
-            return
-
-        # Envoyer la demande de réimpression
-        if self.app.mqtt_client and self.app.mqtt_client.is_connected():
-            self.app.mqtt_client.publish("printer/request_full_reprint",
-                                         self.serial_to_reprint,
-                                         qos=1)
-
-            self._update_ui("🖨️ Réimpression lancée",
-                            f"Série: {self.serial_to_reprint}")
-            self.app.add_message(
-                f"🖨️ Réimpression lancée pour {self.serial_to_reprint}",
-                "success")
-        else:
-            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer la demande")
-            self.app.add_message("❌ MQTT déconnecté - réimpression échouée",
-                                 "error")
-
-        self._reset_scan()
 
     def _handle_await_expedition_serial(self, text):
         """Gère l'attente des serials pour expédition."""
@@ -376,6 +468,7 @@ class ScanManager:
 
         success_count = 0
         sav_count = 0
+        sav_serials = []  # Liste pour stocker les serials SAV
 
         for serial in self.serials_for_expedition:
             try:
@@ -385,6 +478,7 @@ class ScanManager:
                 is_sav_battery = CSVSerialManager.is_battery_in_sav(serial)
 
                 if is_sav_battery:
+                    sav_serials.append(serial)
                     # SEULEMENT sortie SAV, PAS d'expédition normale
                     payload_sav = {
                         "serial_number": serial,
@@ -431,7 +525,7 @@ class ScanManager:
 
             # Envoyer l'email d'expédition
             self._send_expedition_email(self.serials_for_expedition,
-                                        timestamp_iso)
+                                        timestamp_iso, sav_serials)
         else:
             self._update_ui(
                 f"⚠️ Expédition partielle",
@@ -564,17 +658,21 @@ class ScanManager:
         log("ScanManager: Reset", level="DEBUG")
 
         self.current_state = self.STATE_IDLE
-        self.serial_to_reprint = None
         self.serials_for_expedition = []
         self.expedition_mode_active = False
         self.serial_for_sav = None
-        self.serial_to_downgrade = None
+        self.material_letter = None
+        self.validated_model = None
+        self.temp_serial_to_validate = None
 
         self._cancel_timeout()
 
         self._update_ui("Prêt.", "Veuillez scanner ou saisir une commande...")
 
-    def _send_expedition_email(self, serial_numbers, timestamp_expedition):
+    def _send_expedition_email(self,
+                               serial_numbers,
+                               timestamp_expedition,
+                               sav_serials=None):
         """
         Envoie l'email d'expédition de manière asynchrone.
         
@@ -607,7 +705,7 @@ class ScanManager:
                     subject = EmailTemplates.generate_expedition_subject(
                         timestamp_expedition)
                     text_content, html_content = EmailTemplates.generate_expedition_email_content(
-                        serial_numbers, timestamp_expedition)
+                        serial_numbers, timestamp_expedition, sav_serials)
                 except Exception as template_error:
                     log(f"ScanManager: Erreur template email: {template_error}",
                         level="ERROR")
@@ -693,102 +791,129 @@ class ScanManager:
         return True
 
     def _handle_await_qr_text(self, text):
-        """Gère l'attente du texte pour QR."""
-        qr_text = text.strip()
-        if not qr_text:
-            self._update_ui("❌ Texte vide", "Veuillez saisir un texte")
-            self.app.add_message("❌ Texte QR ne peut pas être vide", "error")
-            self._delayed_reset(2000)
+        """Gère l'attente du texte à afficher sur l'étiquette."""
+        display_text = text.strip()
+        if not display_text:
+            self._update_ui("❌ Texte vide",
+                            "Veuillez saisir un texte à afficher.")
             return
 
-        self.qr_text_to_print = qr_text
-        self._change_state(self.STATE_AWAIT_QR_CONFIRM)
+        self.qr_text_to_print = display_text
+        self._change_state(
+            self.STATE_AWAIT_QR_CONTENT)  # Transition vers le nouvel état
+        self._update_ui(f"Texte affiché: '{display_text}'",
+                        "Maintenant, saisissez le contenu pour le QR code.")
+        self._start_timeout()
 
-        self._update_ui(f"✅ QR: {qr_text}", "Scanner 'new qr' pour confirmer")
-        self.app.add_message(f"✅ QR sélectionné: {qr_text}", "success")
+    def _handle_await_qr_content(self, text):
+        """Gère l'attente du contenu pour le QR code."""
+        qr_content = text.strip()
+        if not qr_content:
+            self._update_ui("❌ Contenu vide",
+                            "Veuillez saisir un contenu pour le QR code.")
+            return
+
+        self.qr_content_to_encode = qr_content
+        self._change_state(self.STATE_AWAIT_QR_CONFIRM)
+        self._update_ui(f"Contenu QR: '{qr_content}'",
+                        "Re-scannez 'new qr' pour confirmer et imprimer.")
         self._start_timeout()
 
     def _handle_await_qr_confirm(self, text):
-        """Gère la confirmation QR."""
+        """Gère la confirmation finale et envoie les deux textes via MQTT."""
         if text.lower().strip() != "new qr":
             self._update_ui("❌ Confirmation incorrecte",
                             "Scanner 'new qr' pour confirmer")
-            self.app.add_message(f"❌ Attendu 'new qr', reçu: {text}", "error")
             self._delayed_reset(2000)
             return
 
-        # Envoyer la demande QR via MQTT
         if self.app.mqtt_client and self.app.mqtt_client.is_connected():
-            payload = json.dumps({"qr_text": self.qr_text_to_print})
+            payload = json.dumps({
+                "display_text": self.qr_text_to_print,
+                "qr_content": self.qr_content_to_encode
+            })
             self.app.mqtt_client.publish("printer/create_qr", payload, qos=1)
 
-            self._update_ui("📄 QR envoyé", f"Texte: {self.qr_text_to_print}")
-            self.app.add_message(f"📄 QR créé: {self.qr_text_to_print}",
+            self._update_ui("📄 QR personnalisé envoyé",
+                            f"Texte: {self.qr_text_to_print}")
+            self.app.add_message("Demande de QR personnalisé envoyée.",
                                  "success")
         else:
-            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer le QR")
-            self.app.add_message("❌ MQTT déconnecté - QR échoué", "error")
+            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer la demande")
 
         self._reset_scan()
 
-    def _handle_downgrade_command(self):
-        """Gère la commande downgrade."""
+
+# ==========================================
+# LOGIQUE REPRINT
+# ==========================================
+
+    def _handle_reprint_command(self):
+        """Active le mode réimpression."""
         if not is_printer_service_running():
-            self._update_ui("❌ Service d'impression inactif",
-                            "Downgrade impossible")
-            self.app.add_message("❌ Service d'impression non détecté", "error")
+            self._update_ui("❌ Service inactif", "Réimpression impossible")
             return True
 
-        self._change_state(self.STATE_AWAIT_DOWNGRADE_SERIAL)
-        self._update_ui("📉 Mode Downgrade",
-                        "Scanner le numéro de série à déclasser")
-        self.app.add_message("📉 Mode Downgrade activé", "info")
+        self._change_state(self.STATE_AWAIT_REPRINT_SERIAL)
+        self._update_ui("🔄 Mode Réimpression",
+                        "Scannez le serial (RW-48v... ou A0032)")
+        self.app.add_message("🔄 Mode réimpression activé", "info")
         self._start_timeout()
         return True
 
-    def _handle_await_downgrade_serial(self, text):
-        """Gère l'attente du serial pour le downgrade."""
+    def _handle_await_reprint_serial(self, text):
+        """Traite le serial scanné (Format Long ou Court)."""
+        text = text.strip()
+        serial = None
+
+        # 1. Essayer d'extraire un serial long (RW-48v...)
         serial = self._extract_serial(text)
+
+        # 2. Si pas trouvé, vérifier le format court (A0032)
         if not serial:
-            self._update_ui("❌ Série invalide",
-                            "Format attendu: RW-48v271XXXX")
-            self.app.add_message(f"❌ Format de série invalide: {text}",
-                                 "error")
-            self._delayed_reset(2000)
+            # Regex : Une lettre (A-E) suivie de 4 chiffres
+            match_short = re.match(r"^([A-Ee])(\d{4})$", text)
+            if match_short:
+                serial = text.upper()  # On normalise (ex: a0032 -> A0032)
+
+        if not serial:
+            self._update_ui("❌ Série invalide", "Attendu : RW-48v... ou A0000")
+            self.app.add_message(f"❌ Format non reconnu : {text}", "error")
             return
 
-        self.serial_to_downgrade = serial
-        self._change_state(self.STATE_AWAIT_DOWNGRADE_CONFIRM)
-
-        self._update_ui(f"✅ Série: {serial}",
-                        "Scanner 'downgrade' pour confirmer")
-        self.app.add_message(f"✅ Série sélectionnée: {serial}", "success")
+        self.serial_to_reprint = serial
+        self._change_state(self.STATE_AWAIT_REPRINT_CONFIRM)
+        self._update_ui(f"✅ Série : {serial}",
+                        "Scannez 'reprint' pour confirmer")
+        self.app.add_message(f"✅ Série sélectionnée pour reprint : {serial}",
+                             "success")
         self._start_timeout()
 
-    def _handle_await_downgrade_confirm(self, text):
-        """Gère la confirmation de downgrade."""
-        if text.lower().strip() != "downgrade":
-            self._update_ui("❌ Confirmation incorrecte",
-                            "Scanner 'downgrade' pour confirmer")
-            self.app.add_message(f"❌ Attendu 'downgrade', reçu: {text}",
-                                 "error")
+    def _handle_await_reprint_confirm(self, text):
+        """Confirme et envoie la demande de reprint."""
+        if text.lower().strip() != "reprint":
+            self._update_ui("❌ Confirmation incorrecte", "Attendu : 'reprint'")
             self._delayed_reset(2000)
             return
 
-        # Envoyer la demande de downgrade
         if self.app.mqtt_client and self.app.mqtt_client.is_connected():
-            self.app.mqtt_client.publish("printer/downgrade_battery",
-                                         self.serial_to_downgrade,
-                                         qos=1)
+            # On envoie le serial (court ou long) au service d'impression
+            # C'est le service d'impression qui fera la recherche intelligente dans le CSV
+            payload = json.dumps({"serial_to_reprint": self.serial_to_reprint})
 
-            self._update_ui("📉 Downgrade lancé",
-                            f"Série: {self.serial_to_downgrade}")
+            # Note: Assurez-vous que le topic est bien défini dans PrinterConfig ou utilisez la string
+            topic = "printer/request_full_reprint"
+
+            self.app.mqtt_client.publish(topic, payload, qos=1)
+
+            self._update_ui("🖨️ Réimpression lancée",
+                            f"Pour : {self.serial_to_reprint}")
             self.app.add_message(
-                f"📉 Downgrade lancé pour {self.serial_to_downgrade}",
+                f"🖨️ Demande de reprint envoyée pour {self.serial_to_reprint}",
                 "success")
         else:
-            self._update_ui("❌ Erreur MQTT", "Impossible d'envoyer la demande")
-            self.app.add_message("❌ MQTT déconnecté - downgrade échoué",
+            self._update_ui("❌ Erreur MQTT", "Non connecté")
+            self.app.add_message("❌ Échec envoi reprint (MQTT déconnecté)",
                                  "error")
 
         self._reset_scan()

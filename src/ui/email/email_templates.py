@@ -6,7 +6,8 @@ Ce module centralise tous les templates d'email utilisés par l'application,
 permettant une maintenance et une personnalisation plus faciles.
 """
 from datetime import datetime
-from typing import List
+from typing import List, Dict
+from src.labels.printer_config import PrinterConfig
 
 
 class EmailTemplates:
@@ -26,35 +27,54 @@ class EmailTemplates:
     @staticmethod
     def generate_expedition_email_content(
             serial_numbers: List[str],
-            timestamp_expedition: str) -> tuple[str, str]:
+            timestamp_expedition: str,
+            sav_serials: List[str] | None = None) -> tuple[str, str]:
         """
         Génère le contenu complet d'un email d'expédition (texte et HTML).
-        
-        Args:
-            serial_numbers (List[str]): Liste des numéros de série expédiés
-            timestamp_expedition (str): Timestamp d'expédition au format ISO
-            
-        Returns:
-            tuple[str, str]: (contenu_texte, contenu_html)
         """
-        # Formatage de la date
+        if sav_serials is None: sav_serials = []
         try:
             dt_expedition = datetime.fromisoformat(timestamp_expedition)
             date_formatee = dt_expedition.strftime("%d/%m/%Y à %H:%M:%S")
         except ValueError:
             date_formatee = timestamp_expedition
 
-        # NOUVEAU: Séparation des batteries par capacité
-        serials_13kwh = [s for s in serial_numbers if '271' in s]
-        serials_12kwh = [s for s in serial_numbers if '250' in s]
+        # --- NOUVELLE LOGIQUE DE REGROUPEMENT ---
+        # Regrouper les numéros de série par modèle et SAV
+        serials_by_model: Dict[str, List[str]] = {}
 
-        # Génération du contenu texte
+        for serial in serial_numbers:
+            is_sav = serial in sav_serials  # Vérifie si c'est un SAV
+
+            found_model = False
+            for model_key, model_info in PrinterConfig.BATTERY_MODELS.items():
+                if model_info['ah'] in serial:
+                    kwh = model_info['energy']
+
+                    # Détermine le nom de la catégorie (SAV ou Standard)
+                    if is_sav:
+                        model_name = f"Retours SAV {kwh}kWh"
+                    else:
+                        model_name = f"Batteries {kwh}kWh"
+
+                    if model_name not in serials_by_model:
+                        serials_by_model[model_name] = []
+                    serials_by_model[model_name].append(serial)
+                    found_model = True
+                    break
+
+            if not found_model:
+                # Gestion des cas inconnus, séparés aussi
+                cat_name = "Autres (SAV)" if is_sav else "Autres"
+                if cat_name not in serials_by_model:
+                    serials_by_model[cat_name] = []
+                serials_by_model[cat_name].append(serial)
+
+        # Génération des contenus (les méthodes _generate... utilisent le dictionnaire qu'on vient de créer)
         contenu_texte = EmailTemplates._generate_expedition_text_content(
-            serials_13kwh, serials_12kwh, date_formatee)
-
-        # Génération du contenu HTML
+            serials_by_model, date_formatee)
         contenu_html = EmailTemplates._generate_expedition_html_content(
-            serials_13kwh, serials_12kwh, date_formatee)
+            serials_by_model, date_formatee)
 
         return contenu_texte, contenu_html
 
@@ -83,37 +103,27 @@ class EmailTemplates:
             return f"Récapitulatif d'expedition du {date_formatee}"
 
     @staticmethod
-    def _generate_expedition_text_content(serials_13kwh: List[str],
-                                          serials_12kwh: List[str],
+    def _generate_expedition_text_content(serials_by_model: Dict[str,
+                                                                 List[str]],
                                           date_formatee: str) -> str:
         """
         Génère le contenu texte de l'email d'expédition.
         """
-        total_batteries = len(serials_13kwh) + len(serials_12kwh)
-        total_13kwh = len(serials_13kwh)
-        total_12kwh = len(serials_12kwh)
+        total_batteries = sum(
+            len(serials) for serials in serials_by_model.values())
 
-        # Corps principal (phrase d'intro inchangée)
         corps_principal = f"Bonjour,\n\nVoici la liste des batteries marquées comme expédiées le {date_formatee}:\n\n"
 
-        # Liste des batteries 13kWh
-        if serials_13kwh:
-            corps_principal += f"--- Batteries 13kWh ({total_13kwh}) ---\n"
-            for i, serial in enumerate(serials_13kwh, 1):
+        # Boucle sur chaque modèle trouvé
+        for model_name, serials in serials_by_model.items():
+            total_model = len(serials)
+            corps_principal += f"--- {model_name} ({total_model}) ---\n"
+            for i, serial in enumerate(serials, 1):
                 corps_principal += f"{i:2d}. {serial}\n"
             corps_principal += "\n"
 
-        # Liste des batteries 12kWh
-        if serials_12kwh:
-            corps_principal += f"--- Batteries 12kWh ({total_12kwh}) ---\n"
-            for i, serial in enumerate(serials_12kwh, 1):
-                corps_principal += f"{i:2d}. {serial}\n"
-            corps_principal += "\n"
-
-        # Ligne de total avec détail conditionnel
+        # Ligne de total
         recap_total = f"📦 TOTAL EXPÉDIÉ: {total_batteries} batterie{'s' if total_batteries > 1 else ''}"
-        if total_13kwh > 0 and total_12kwh > 0:
-            recap_total += f" (dont {total_13kwh} en 13kWh et {total_12kwh} en 12kWh)"
         corps_principal += recap_total + "\n"
 
         # Formule de politesse
@@ -138,23 +148,16 @@ class EmailTemplates:
         return corps_principal + formule_politesse + zone_signature + signature_entreprise
 
     @staticmethod
-    def _generate_expedition_html_content(serials_13kwh: List[str],
-                                          serials_12kwh: List[str],
+    def _generate_expedition_html_content(serials_by_model: Dict[str,
+                                                                 List[str]],
                                           date_formatee: str) -> str:
         """
         Génère le contenu HTML de l'email d'expédition.
         """
-        total_batteries = len(serials_13kwh) + len(serials_12kwh)
-        total_13kwh = len(serials_13kwh)
-        total_12kwh = len(serials_12kwh)
+        total_batteries = sum(
+            len(serials) for serials in serials_by_model.values())
+        description = f"des <strong>{total_batteries} batteries</strong> marquées comme expédiées" if total_batteries > 1 else "de la batterie marquée comme expédiée"
 
-        # Description (phrase d'intro inchangée)
-        if total_batteries > 1:
-            description = f"des <strong>{total_batteries} batteries</strong> marquées comme expédiées"
-        else:
-            description = "de la batterie marquée comme expédiée"
-
-        # En-tête et introduction
         html_body = f"""
             <html>
             <body>
@@ -162,35 +165,30 @@ class EmailTemplates:
                 <p>Voici la liste {description} le <strong>{date_formatee}</strong>:</p>
             """
 
-        # Section pour les batteries 13kWh
-        if serials_13kwh:
-            html_body += f'<h3>Batteries 13kWh ({total_13kwh})</h3><ul>'
-            for serial in serials_13kwh:
-                html_body += f"<li><strong>{serial}</strong></li>"
-            html_body += "</ul>"
-
-        # Section pour les batteries 12kWh
-        if serials_12kwh:
-            html_body += f'<h3>Batteries 12kWh ({total_12kwh})</h3><ul>'
-            for serial in serials_12kwh:
+        # Boucle sur chaque modèle trouvé
+        for model_name, serials in serials_by_model.items():
+            total_model = len(serials)
+            html_body += f'<h3>{model_name} ({total_model})</h3><ul>'
+            for serial in serials:
                 html_body += f"<li><strong>{serial}</strong></li>"
             html_body += "</ul>"
 
         # Récapitulatif
-        recap_detail = ""
-        if total_13kwh > 0 and total_12kwh > 0:
-            recap_detail = f"""
-            <p style="margin: 5px 0 0 0; font-size: 14px; color: #555;">
-                (Détail: {total_13kwh} en 13kWh et {total_12kwh} en 12kWh)
-            </p>
-            """
+        recap_detail_parts = [
+            f"{len(serials)} en {model_name.split(' ')[1]}"
+            for model_name, serials in serials_by_model.items()
+        ]
+        recap_detail_str = f"(Détail: {', '.join(recap_detail_parts)})" if len(
+            recap_detail_parts) > 1 else ""
 
         html_body += f"""
             <div style="margin-top: 20px; padding: 15px; background-color: #f0f8ff; border-left: 4px solid #4CAF50;">
                 <p style="margin: 0; font-weight: bold; font-size: 16px;">
                     📦 TOTAL EXPÉDIÉ: {total_batteries} batterie{'s' if total_batteries > 1 else ''}
                 </p>
-                {recap_detail}
+                <p style="margin: 5px 0 0 0; font-size: 14px; color: #555;">
+                    {recap_detail_str}
+                </p>
             </div>
             
             <p>Cordialement,</p>

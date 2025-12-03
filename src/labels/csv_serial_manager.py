@@ -6,6 +6,8 @@ import csv
 import os
 import random
 import string
+import re
+from datetime import datetime
 from src.ui.system_utils import log
 from .printer_config import PrinterConfig
 
@@ -20,7 +22,7 @@ class CSVSerialManager:
     Classe pour gérer les opérations CSV et la génération de numéros de série.
     """
     # Configuration
-    SERIAL_PREFIX = "RW-48v271"
+    SERIAL_PREFIX_BASE = "RW-48v"
     SERIAL_NUMERIC_LENGTH = 4
     SERIAL_CSV_FILE = CSV_FILE_PATH
     SAV_CSV_FILE = SAV_CSV_FILE_PATH
@@ -75,8 +77,7 @@ class CSVSerialManager:
                     writer.writerow([
                         "TimestampImpression", "NumeroSerie",
                         "CodeAleatoireQR", "TimestampTestDone",
-                        "TimestampExpedition", "checker_name", "version",
-                        "sav_status"
+                        "TimestampExpedition", "type", "version", "sav_status"
                     ])
                 log(f"En-têtes CSV ajoutés dans '{CSVSerialManager.SERIAL_CSV_FILE}'.",
                     level="INFO")
@@ -137,49 +138,153 @@ class CSVSerialManager:
 
     @staticmethod
     def get_last_serial_from_csv():
-        """Lit le CSV et retourne le dernier NumeroSerie enregistré.
+        """Lit le CSV et retourne le dernier NumeroSerie enregistré en se basant sur la partie numérique.
            Retourne None si le fichier est vide, n'existe pas, ou en cas d'erreur."""
+        last_numeric_part = -1
+        last_full_serial = None
+        # CORRECTION: Regex plus flexible qui accepte "XXX" ou des chiffres pour la capacité
+        pattern = re.compile(r"RW-48v(XXX|\d+)(\d{4})")
+
         try:
             if not os.path.exists(CSVSerialManager.SERIAL_CSV_FILE):
                 log(f"Le fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}' n'existe pas. Aucun dernier sérial.",
                     level="INFO")
                 return None
+
             with open(CSVSerialManager.SERIAL_CSV_FILE,
                       mode='r',
                       newline='',
                       encoding='utf-8') as f:
-                reader = csv.reader(f)
-                header = next(reader, None)
-                if not header:
-                    log(f"Fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}' est vide (ou ne contient que l'entête).",
-                        level="INFO")
-                    return None
-
-                last_row = None
+                reader = csv.DictReader(f)
                 for row in reader:
-                    if row:
-                        last_row = row
+                    serial = row.get("NumeroSerie")
+                    if serial:
+                        # On ne cherche plus au début de la chaine, mais n'importe où
+                        match = pattern.search(serial)
+                        if match:
+                            numeric_part = int(match.group(
+                                2))  # Le groupe 2 contient les 4 chiffres
+                            if numeric_part > last_numeric_part:
+                                last_numeric_part = numeric_part
+                                last_full_serial = serial
 
-                if last_row and len(last_row) > 1:
-                    log(f"Dernière ligne lue du CSV: {last_row}",
-                        level="DEBUG")
-                    return last_row[1]
-                else:
-                    log(f"Aucune donnée trouvée dans '{CSVSerialManager.SERIAL_CSV_FILE}' après l'entête.",
-                        level="INFO")
-                    return None
-        except FileNotFoundError:
-            log(f"Le fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}' n'a pas été trouvé lors de la lecture du dernier sérial.",
-                level="INFO")
-            return None
-        except IOError as e:
+            if last_full_serial:
+                log(f"Dernier sérial trouvé dans le CSV: {last_full_serial}",
+                    level="DEBUG")
+                return last_full_serial
+            else:
+                log(f"Aucun sérial correspondant au format trouvé dans '{CSVSerialManager.SERIAL_CSV_FILE}'.",
+                    level="INFO")
+                return None
+
+        except (IOError, FileNotFoundError) as e:
             log(f"Erreur d'IO lors de la lecture de '{CSVSerialManager.SERIAL_CSV_FILE}': {e}",
                 level="ERROR")
             return None
         except Exception as e:
-            log(f"Erreur inattendue lors de la lecture du dernier sérial de '{CSVSerialManager.SERIAL_CSV_FILE}': {e}",
+            log(f"Erreur inattendue lors de la lecture du dernier sérial: {e}",
                 level="ERROR")
             return None
+
+    @staticmethod
+    def validate_and_update_serial(temp_serial_to_find, final_model_key):
+        """
+        Trouve une batterie par son QR code temporaire, met à jour son numéro de série et retourne les détails.
+        """
+        if not os.path.exists(CSVSerialManager.SERIAL_CSV_FILE):
+            log(f"Fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}' non trouvé pour la validation.",
+                level="ERROR")
+            return None, None, None, None, None, None, None
+
+        rows_to_write = []
+        updated_in_memory = False
+        details_for_print = {}
+        header = []
+
+        try:
+            with open(CSVSerialManager.SERIAL_CSV_FILE,
+                      mode='r',
+                      newline='',
+                      encoding='utf-8') as f_read:
+                reader = csv.reader(f_read)
+                header = next(reader, None)
+                if not header:
+                    return None, None, None, None, None, None, None
+                rows_to_write.append(header)
+
+                # Obtenir les index des colonnes importantes
+                serial_col = header.index("NumeroSerie")
+                type_col = header.index("type")
+                qr_col = header.index("CodeAleatoireQR")
+                ts_impression_col = header.index("TimestampImpression")
+                ts_testdone_col = header.index("TimestampTestDone")
+
+                for row in reader:
+                    # Reconstituer le QR code temporaire à partir des données du CSV
+                    material_letter = row[type_col]
+                    numeric_part = row[serial_col][-4:]
+                    current_temp_serial = f"{material_letter}{numeric_part}"
+
+                    if current_temp_serial == temp_serial_to_find:
+                        model_info = PrinterConfig.BATTERY_MODELS.get(
+                            final_model_key)
+                        if not model_info:
+                            raise ValueError(
+                                f"Modèle final '{final_model_key}' non trouvé."
+                            )
+
+                        # Construire le nouveau sérial
+                        new_serial = f"RW-48v{model_info['ah']}{numeric_part}"
+
+                        original_ah_match = re.search(r"RW-48v(\w+)",
+                                                      row[serial_col])
+                        original_model_changed = (
+                            original_ah_match.group(1)
+                            != 'XXX') if original_ah_match else True
+
+                        # Mettre à jour la ligne
+                        row[serial_col] = new_serial
+                        row[ts_testdone_col] = datetime.now().isoformat()
+                        updated_in_memory = True
+
+                        details_for_print = {
+                            "new_serial": new_serial,
+                            "random_qr_code": row[qr_col],
+                            "timestamp_impression": row[ts_impression_col],
+                            "original_model_changed": original_model_changed,
+                            "kwh": model_info['energy'],
+                            "ah": model_info['ah'],
+                            "type": row[type_col]
+                        }
+                        log(f"Validation: {temp_serial_to_find} -> {new_serial}. Changement modèle: {original_model_changed}",
+                            level="INFO")
+
+                    rows_to_write.append(row)
+
+            if updated_in_memory:
+                with open(CSVSerialManager.SERIAL_CSV_FILE,
+                          mode='w',
+                          newline='',
+                          encoding='utf-8') as f_write:
+                    writer = csv.writer(f_write)
+                    writer.writerows(rows_to_write)
+
+                log(f"Fichier CSV mis à jour avec le sérial validé: {details_for_print['new_serial']}",
+                    level="INFO")
+                return (details_for_print["new_serial"],
+                        details_for_print["random_qr_code"],
+                        details_for_print["timestamp_impression"],
+                        details_for_print["original_model_changed"],
+                        details_for_print["kwh"], details_for_print["ah"],
+                        details_for_print["type"])
+            else:
+                log(f"Aucun sérial initial correspondant à '{temp_serial_to_find}' trouvé pour validation.",
+                    level="WARNING")
+                return None, None, None, None, None, None, None
+
+        except Exception as e:
+            log(f"Erreur lors de la validation du sérial: {e}", level="ERROR")
+            return None, None, None, None, None, None, None
 
     @staticmethod
     def is_battery_in_sav(serial_number):
@@ -342,56 +447,57 @@ class CSVSerialManager:
             return False
 
     @staticmethod
-    def generate_next_serial_number():
-        """Génère le prochain NumeroSerie en incrémentant le dernier du CSV."""
+    def generate_next_numeric_part():
+        """Génère la prochaine partie numérique en incrémentant la plus haute trouvée dans le CSV."""
         last_serial = CSVSerialManager.get_last_serial_from_csv()
+        numeric_part_int = 0
 
-        if last_serial is None or not last_serial.startswith(
-                CSVSerialManager.SERIAL_PREFIX):
-            numeric_part_int = 0
-        else:
-            try:
-                numeric_str = last_serial[len(CSVSerialManager.SERIAL_PREFIX):]
-                numeric_part_int = int(numeric_str) + 1
-            except ValueError:
-                log(f"Impossible de parser la partie numérique du dernier sérial '{last_serial}'. Réinitialisation à 0.",
-                    level="ERROR")
-                numeric_part_int = 0
+        # Regex pour extraire uniquement les 4 derniers chiffres
+        pattern = re.compile(r"(\d{4})$")
+
+        if last_serial:
+            match = pattern.search(last_serial)
+            if match:
+                try:
+                    numeric_part_int = int(match.group(1)) + 1
+                except (ValueError, IndexError):
+                    log(f"Impossible de parser la partie numérique de '{last_serial}'. Réinitialisation.",
+                        level="ERROR")
+                    numeric_part_int = 0
 
         next_numeric_part_str = str(numeric_part_int).zfill(
             CSVSerialManager.SERIAL_NUMERIC_LENGTH)
-        next_serial = f"{CSVSerialManager.SERIAL_PREFIX}{next_numeric_part_str}"
-        log(f"Prochain NumeroSerie généré: {next_serial}", level="INFO")
-        return next_serial
+        log(f"Prochaine partie numérique générée: {next_numeric_part_str}",
+            level="INFO")
+        return next_numeric_part_str
 
     @staticmethod
-    def add_serial_to_csv(timestamp,
-                          numero_serie,
-                          code_aleatoire_qr,
-                          checker_name=""):
-        """Ajoute une nouvelle ligne au fichier CSV des sérials."""
-        # Initialisation du CSV si besoin
-        log("DEBUG: Début de add_serial_to_csv()", level="INFO")
+    def add_initial_serial_to_csv(timestamp, numeric_part, material_letter,
+                                  code_aleatoire_qr):
+        """Ajoute une nouvelle ligne au CSV pour la création initiale."""
         CSVSerialManager.initialize_serial_csv()
+
+        # Construit le numéro de série initial avec des placeholders pour la capacité (Ah)
+        # Exemple: RW-48vXXX0210
+        initial_serial = f"RW-48vXXX{numeric_part}"
+
         try:
             with open(CSVSerialManager.SERIAL_CSV_FILE,
                       mode='a',
                       newline='',
                       encoding='utf-8') as f:
                 writer = csv.writer(f)
+                # Ajoute la lettre dans la nouvelle colonne "type"
                 writer.writerow([
-                    timestamp, numero_serie, code_aleatoire_qr, "", "",
-                    checker_name, PrinterConfig.SOFTWARE_VERSION, "False"
+                    timestamp, initial_serial, code_aleatoire_qr, "", "",
+                    material_letter.upper(), PrinterConfig.SOFTWARE_VERSION,
+                    "False"
                 ])
-            log(f"Ajouté au CSV: {timestamp}, {numero_serie}, {code_aleatoire_qr}, {checker_name}, {PrinterConfig.SOFTWARE_VERSION}",
+            log(f"Ajout initial au CSV: {initial_serial}, Type: {material_letter.upper()}",
                 level="INFO")
             return True
         except IOError as e:
             log(f"Impossible d'écrire dans le fichier CSV '{CSVSerialManager.SERIAL_CSV_FILE}': {e}",
-                level="ERROR")
-            return False
-        except Exception as e:
-            log(f"Erreur inattendue lors de l'écriture dans '{CSVSerialManager.SERIAL_CSV_FILE}': {e}",
                 level="ERROR")
             return False
 
@@ -784,3 +890,100 @@ class CSVSerialManager:
             log(f"Erreur lors de la mise à jour du serial pour le downgrade: {e}",
                 level="ERROR")
             return False
+
+    @staticmethod
+    def search_battery_for_reprint(input_serial):
+        """
+        Recherche intelligente pour le reprint.
+        Accepte : RW-48v... OU A0032
+        Retourne : Dictionnaire avec toutes les infos ou None
+        """
+        import re
+        if not os.path.exists(CSVSerialManager.SERIAL_CSV_FILE):
+            return None
+
+        # Analyse de l'entrée
+        input_serial = input_serial.strip()
+        target_digits = ""
+        target_type = ""
+        is_short_format = False
+
+        # Est-ce un format court (A0032) ?
+        match_short = re.match(r"^([A-E])(\d{4})$", input_serial.upper())
+        if match_short:
+            target_type = match_short.group(1)
+            target_digits = match_short.group(2)
+            is_short_format = True
+        else:
+            # On suppose un format long, on extrait les 4 derniers chiffres
+            match_long = re.search(r"(\d{4})$", input_serial)
+            if match_long:
+                target_digits = match_long.group(1)
+            else:
+                return None  # Format inconnu
+
+        try:
+            with open(CSVSerialManager.SERIAL_CSV_FILE,
+                      mode='r',
+                      newline='',
+                      encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+
+                for row in reader:
+                    csv_serial = row.get("NumeroSerie", "")
+                    csv_type = row.get("type", "")
+
+                    # Extraction des 4 derniers chiffres du CSV
+                    csv_match = re.search(r"(\d{4})$", csv_serial)
+                    if not csv_match:
+                        continue
+                    csv_digits = csv_match.group(1)
+
+                    # LOGIQUE DE MATCH
+                    match_found = False
+
+                    if is_short_format:
+                        # Si on cherche A0032, il faut que Type=A et Digits=0032
+                        if csv_digits == target_digits and csv_type == target_type:
+                            match_found = True
+                    else:
+                        # Si on cherche RW...341, on cherche le serial exact
+                        if csv_serial == input_serial:
+                            match_found = True
+
+                    if match_found:
+                        # On a trouvé la ligne ! On prépare tout pour l'impression
+
+                        # 1. Vérification Test Done
+                        ts_test = row.get("TimestampTestDone", "").strip()
+                        is_test_done = len(
+                            ts_test) > 5  # S'il y a une date, c'est fait
+
+                        # 2. Construction du Short Serial pour l'étiquette V1 (TOUJOURS)
+                        # Ex: Type 'B' + Digits '0341' -> B0341
+                        short_serial_v1 = f"{csv_type}{csv_digits}"
+
+                        return {
+                            "full_serial":
+                            csv_serial,  # Pour Main/Shipping
+                            "short_serial":
+                            short_serial_v1,  # Pour V1
+                            "random_code":
+                            row.get("CodeAleatoireQR", ""),
+                            "timestamp_impression":
+                            row.get("TimestampImpression", ""),
+                            "kwh":
+                            0,  # Sera rempli par le handler si besoin via config
+                            "ah":
+                            0,  # Sera rempli par le handler si besoin via config
+                            "type":
+                            csv_type,
+                            "is_test_done":
+                            is_test_done
+                        }
+
+            return None  # Pas trouvé
+
+        except Exception as e:
+            log(f"Erreur recherche reprint: {e}", level="ERROR")
+            return None

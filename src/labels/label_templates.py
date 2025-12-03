@@ -11,7 +11,8 @@ class LabelTemplates:
     """
 
     @staticmethod
-    def get_main_label_zpl(serial_number, random_code_for_qr, kwh, ah):
+    def get_main_label_zpl(serial_number, random_code_for_qr, kwh, ah,
+                           material_letter):
         """
         Template ZPL pour l'étiquette principale avec QR code.
         
@@ -24,7 +25,7 @@ class LabelTemplates:
         Returns:
             str: Commande ZPL formatée
         """
-        modele = f"RW-48V{ah}{kwh}"
+        modele = f"RW-48V{ah}{str(kwh).replace('.0', '')}{material_letter}"
         return f"""
    ^XA
     ~TA000
@@ -75,7 +76,7 @@ class LabelTemplates:
     ^FT246,345^A0N,14,15^FH\\^CI28^FDREVAW^FS^CI27
     ^FT246,365^A0N,14,15^FH\\^CI28^FDwww.revaw.fr^FS^CI27
     ^FT246,383^A0N,14,15^FH\\^CI28^FD^FS^CI27
-    ^FT28,171^A0N,14,15^FH\\^CI28^FDNumero de serie : {serial_number}^FS^CI27
+    ^FT28,165^A0N,40,40^FH\\^CI28^FDSN :{serial_number}^FS^CI27
     ^FT28,403^BQN,2,7
     ^FH\\^FDLA,https://www.revaw.fr/passport/{serial_number}/{random_code_for_qr}^FS
     ^PQ1,0,1,Y
@@ -83,8 +84,7 @@ class LabelTemplates:
     """
 
     @staticmethod
-    def get_v1_label_zpl(serial_number, random_code_for_qr,
-                         fabrication_date_str):
+    def get_v1_label_zpl(serial_number, fabrication_date_str):
         """
         Template ZPL pour l'étiquette V1 (interieur batterie) avec date de fabrication.
         
@@ -173,3 +173,22 @@ class LabelTemplates:
 ^PQ1,0,1,Y
 ^XZ
 """
+
+    @staticmethod
+    def get_custom_qr_label_zpl(display_text, qr_content):
+        """
+        Template ZPL pour une étiquette avec un texte affiché et un contenu QR distincts.
+        """
+        return f"""
+    ^XA
+    ~TA000
+    ^PW815
+    ^LL200
+    ^LS0
+    ^FT50,80^A0N,40,40^FH\\^CI28^FD{display_text}^FS^CI27
+    ^FO500,20
+    ^BQN,2,8
+    ^FH\\^FDLA,{qr_content}^FS
+    ^PQ1,0,1,Y
+    ^XZ
+    """
