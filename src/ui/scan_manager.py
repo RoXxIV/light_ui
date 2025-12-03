@@ -410,6 +410,13 @@ class ScanManager:
             self.app.add_message(f"❌ Format invalide: {text}", "error")
             return
 
+        # Refuser les batterie non terminé "XXX"
+        if "XXX" in serial:
+            self._update_ui("❌ Batterie non finie",
+                            "Refusé: Batterie non terminée aH non définie")
+            self.app.add_message(f"❌ Batterie non terminée: {serial}", "error")
+            return  # Ne pas ajouter la batterie, retour immediat
+
         if serial not in self.serials_for_expedition:
             self.serials_for_expedition.append(serial)
             self.app.add_message(f"➕ Ajouté: {serial}", "success")
@@ -566,6 +573,14 @@ class ScanManager:
                             "Format attendu: RW-48v271XXXX")
             self.app.add_message(f"❌ Format de série invalide: {text}",
                                  "error")
+            self._delayed_reset(2000)
+            return
+
+        # Refuser les batterie non terminé "XXX"
+        if "XXX" in serial:
+            self._update_ui("❌ Batterie non finie",
+                            "Refusé: Batterie non terminée")
+            self.app.add_message(f"❌ Batterie non terminée: {serial}", "error")
             self._delayed_reset(2000)
             return
 
