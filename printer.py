@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Service d'impression minimal avec file d'attente persistante :
-- CREATE : Créer ligne CSV + ajouter à la file d'impression
+- CREATE : Créer entrée SQLite + ajouter à la file d'impression
 - REPRINT : Ajouter à la file d'impression
-- EXPEDITION : Mettre à jour timestamp expédition dans CSV
+- EXPEDITION : Mettre à jour timestamp expédition dans SQLite
 """
 
 import socket
@@ -408,7 +408,7 @@ class MinimalPrinter:
 
     def _handle_expedition(self, payload_str):
         """
-        EXPEDITION : Mettre à jour timestamp expédition dans CSV.
+        EXPEDITION : Mettre à jour timestamp expédition dans SQLite.
         Format: {"serial_number": "RW-48v271XXXX", "timestamp_expedition": "2025-01-01T12:00:00"}
         """
         try:
@@ -683,7 +683,7 @@ class MinimalPrinter:
 
     def _handle_create(self, payload_str):
         """
-        CREATE INITIAL : Crée une ligne CSV avec un sérial temporaire et imprime l'étiquette V1.
+        CREATE INITIAL : Crée une entrée SQLite avec un sérial temporaire et imprime l'étiquette V1.
         Format: {"material_letter": "A"}
         """
         try:
@@ -752,7 +752,7 @@ class MinimalPrinter:
 
     def _handle_validate_battery(self, payload_str):
         """
-        VALIDATE : Met a jour le serial dans le CSV et imprime les etiquettes finales.
+        VALIDATE : Met a jour le serial dans SQLite et imprime les etiquettes finales.
         """
         try:
             data = json.loads(payload_str)

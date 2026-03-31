@@ -935,7 +935,7 @@ class ScanManager:
             # C'est le service d'impression qui fera la recherche intelligente dans le CSV
             payload = json.dumps({"serial_to_reprint": self.serial_to_reprint})
 
-            # Note: Assurez-vous que le topic est bien défini dans PrinterConfig ou utilisez la string
+            # Le topic est défini dans PrinterConfig.MQTT_TOPIC_REQUEST_FULL_REPRINT
             topic = "printer/request_full_reprint"
 
             self.app.mqtt_client.publish(topic, payload, qos=1)

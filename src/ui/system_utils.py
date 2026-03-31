@@ -25,18 +25,6 @@ LEVEL_MAPPING = {
 }
 DATA_DIR = "data"
 
-import logging
-import logging.handlers
-import os
-
-# Configuration avec dossier logs/
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")  # Nouveau dossier logs/
-LOG_FILE = os.path.join(LOGS_DIR, "banc_test.log")  # logs/banc_test.log
-# Vos niveaux
-LOG_LEVELS = ["DEEP_DEBUG", "DEBUG", "INFO", "ERROR", "WARNING"]
-CURRENT_LOG_LEVEL = "INFO"
-
 
 def setup_logging():
     """Configuration avec structure propre dans logs/"""
