@@ -888,9 +888,9 @@ class MinimalPrinter:
                     elif "250" in full_serial:
                         kwh = 12.0
                         ah = 250
-                    elif "179" in full_serial:
-                        kwh = 8.6
-                        ah = 179
+                    elif "175" in full_serial:
+                        kwh = 8.4
+                        ah = 175
 
                     if kwh > 0:
                         # Ajout Main + Shipping à la file

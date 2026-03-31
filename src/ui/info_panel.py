@@ -320,7 +320,7 @@ class InfoPanel:
         MODELS = {
             "13": "13 kWh  —  271 Ah  (types A, B, C)",
             "12": "12 kWh  —  250 Ah  (types A, B, C)",
-            "8.6": " 8.6 kWh  —  175 Ah  (types D, E)",
+            "8.4": " 8.4 kWh  —  175 Ah  (types D, E)",
         }
 
         modal = ctk.CTkToplevel(self.app)

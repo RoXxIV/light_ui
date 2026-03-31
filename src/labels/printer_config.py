@@ -9,7 +9,7 @@ class PrinterConfig:
     Configuration centralisée pour l'imprimante et les services MQTT.
     """
     # --- Dictionnaire des Modèles de Batteries ---
-    # Clé: L'identifiant scanné par l'utilisateur (ex: "13", "12", "8.6")
+    # Clé: L'identifiant scanné par l'utilisateur (ex: "13", "12", "8.4")
     # Valeurs: Un dictionnaire contenant 'energy' (kWh) et 'ah'
     BATTERY_MODELS = {
         "13": {
@@ -20,7 +20,7 @@ class PrinterConfig:
             "energy": 12.0,
             "ah": "250"
         },
-        "8.6": {
+        "8.4": {
             "energy": 8.4,
             "ah": "175"
         }

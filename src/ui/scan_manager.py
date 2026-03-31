@@ -209,7 +209,7 @@ class ScanManager:
         
         Args:
             material_letter (str): La lettre du matériau (A, B, C, D, E).
-            model_key (str): La clé du modèle de finition (ex: "13", "12", "8.6").
+            model_key (str): La clé du modèle de finition (ex: "13", "12", "8.4").
             
         Returns:
             bool: True si la combinaison est valide, False sinon.
