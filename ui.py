@@ -13,7 +13,8 @@ import time
 import os
 from src.ui.system_utils import log, MQTT_BROKER, MQTT_PORT
 from src.ui.scan_manager import ScanManager
-from src.ui.info_panel import InfoPanel  # Nouveau import
+from src.ui.info_panel import InfoPanel
+from src.db import SQLiteManager
 
 # Import des modules email pour s'assurer qu'ils sont disponibles
 try:
@@ -38,7 +39,7 @@ class SimpleApp(ctk.CTk):
         self.mqtt_client = None
 
         # === CONFIGURATION FENÊTRE ===
-        self.title("Revaw - Gestion Étiquettes")
+        self.title("Revaw - Interface de production")
         self.geometry("1200x800")
         self.attributes("-fullscreen", True)
         self.bind("<Escape>", lambda e: self.attributes("-fullscreen", False))
@@ -216,7 +217,7 @@ class SimpleApp(ctk.CTk):
 
         self.info_label = ctk.CTkLabel(
             self.frame_info,
-            text="Commandes: create <nom> | reprint | expedition | sav",
+            text="Commandes: create <A-E> | finish <kWh> | expedition | sav",
             font=("Helvetica", 12),
             text_color="#808080")
         self.info_label.pack(pady=5)
@@ -419,6 +420,7 @@ def main():
     """Point d'entrée principal."""
     try:
         log("SimpleUI: Démarrage de l'application simplifiée", level="INFO")
+        SQLiteManager.init_db()
         app = SimpleApp()
         app.mainloop()
         log("SimpleUI: Application terminée", level="INFO")

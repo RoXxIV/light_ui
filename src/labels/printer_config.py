@@ -8,24 +8,41 @@ class PrinterConfig:
     """
     Configuration centralisée pour l'imprimante et les services MQTT.
     """
-
+    # --- Dictionnaire des Modèles de Batteries ---
+    # Clé: L'identifiant scanné par l'utilisateur (ex: "13", "12", "8.6")
+    # Valeurs: Un dictionnaire contenant 'energy' (kWh) et 'ah'
+    BATTERY_MODELS = {
+        "13": {
+            "energy": 13.0,
+            "ah": "271"
+        },
+        "12": {
+            "energy": 12.0,
+            "ah": "250"
+        },
+        "8.6": {
+            "energy": 8.4,
+            "ah": "175"
+        }
+    }
     # --- Configuration MQTT ---
     MQTT_BROKER_HOST = "localhost"
     MQTT_BROKER_PORT = 1883
     # Topics MQTT
     MQTT_TOPIC_CREATE_LABEL = "printer/create_label"
-    MQTT_TOPIC_REQUEST_FULL_REPRINT = "printer/request_full_reprint"
     MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP = "printer/update_shipping_timestamp"
     MQTT_TOPIC_TEST_DONE = "printer/test_done"
     MQTT_TOPIC_CREATE_BATCH_LABELS = "printer/create_batch_labels"
     MQTT_TOPIC_SAV_ENTRY = "printer/sav_entry"
     MQTT_TOPIC_SAV_DEPARTURE = "printer/sav_departure"
     MQTT_TOPIC_CREATE_QR = "printer/create_qr"
+    MQTT_TOPIC_VALIDATE_BATTERY = "printer/validate_battery"
+    MQTT_TOPIC_REQUEST_FULL_REPRINT = "printer/request_full_reprint"
     # --- Configuration Imprimante ---
     PRINTER_IP = "192.168.1.123"  # ip de l'imprimante
     PRINTER_PORT = 9100
     # --- Configuration Version Software ---
-    SOFTWARE_VERSION = "1.03"  # Version dynamique du software
+    SOFTWARE_VERSION = "1.1.5.1"  # Version dynamique du software
     # --- Intervalles et Timeouts (secondes) ---
     RETRY_DELAY_ON_ERROR_S = 10
     POLL_DELAY_WHEN_IDLE_S = 1
@@ -45,5 +62,4 @@ class PrinterConfig:
     ERROR_MASK_CUTTER_FAULT = 0x08  # Bit 3
     # --- Configuration CSV et Sériaux ---
     SERIAL_CSV_FILE = "printed_serials.csv"
-    SERIAL_PREFIX = "RW-48v271"
     SERIAL_NUMERIC_LENGTH = 4

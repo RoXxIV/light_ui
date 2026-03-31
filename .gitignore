@@ -1,6 +1,21 @@
+# Python
 *.pyc
+__pycache__/
+
+# Environnement
 venv/
-src/logs
+
+# Logs
+src/logs/
+
+# Donnees de production
 printed_serials.csv
 sav_batteries.csv
+revaw.db
+
+# Credentials
 src/ui/email/email_config.json
+
+# Divers
+pending/
+docs/
