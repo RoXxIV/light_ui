@@ -27,7 +27,7 @@ class PrinterConfig:
     }
     # --- Configuration MQTT ---
     MQTT_BROKER_HOST = "localhost"
-    MQTT_BROKER_PORT = 1883
+    MQTT_BROKER_PORT = 1884
     # Topics MQTT
     MQTT_TOPIC_CREATE_LABEL = "printer/create_label"
     MQTT_TOPIC_UPDATE_SHIPPING_TIMESTAMP = "printer/update_shipping_timestamp"

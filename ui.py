@@ -268,8 +268,9 @@ class SimpleApp(ctk.CTk):
             log("SimpleUI: Connexion MQTT réussie", level="INFO")
             self.update_status("mqtt", "✅ MQTT: Connecté", "green")
 
-            # S'abonner au statut imprimante
+            # S'abonner au statut imprimante et aux résultats d'opérations
             client.subscribe("printer/status", 0)
+            client.subscribe("printer/operation/result", 0)
 
             self.add_message("✅ Système connecté", "info")
 
@@ -288,6 +289,20 @@ class SimpleApp(ctk.CTk):
                 else:
                     self.update_status("printer", "❌ Imprimante: Hors ligne",
                                        "red")
+
+            elif msg.topic == "printer/operation/result":
+                import json as _json
+                data = _json.loads(payload)
+                operation = data.get("operation", "")
+                success = data.get("success", False)
+                message = data.get("message", "")
+                if operation == "create":
+                    if success:
+                        self.add_message(f"✅ {message}", "success")
+                        self.scan_manager._reset_scan()
+                    else:
+                        self.add_message(f"❌ Création échouée: {message}", "error")
+                        self.scan_manager._reset_scan()
 
         except Exception as e:
             log(f"SimpleUI: Erreur traitement message MQTT: {e}",
